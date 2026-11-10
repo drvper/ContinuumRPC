@@ -32,8 +32,10 @@ Troubleshooting
     - Windows Security > Virus & threat protection > Protection history
     - Event Viewer > Windows Logs > Application, "Application Error"
       entries for Continuum.exe
-* To narrow a problem down, try Enabled=0 under [Memory] in cRPC.ini
-  (presence without reading the game's memory).
+* If cRPC.log says "access denied by the game", your Continuum does not
+  let other programs read it. cRPC then shows your zone, ship (picked with
+  Esc and 1-8 / S) and status without the memory-only details (frequency,
+  bounty, flags, map, team size). This is expected and works automatically.
 * Make sure "Share my activity" is enabled in Discord
   (User Settings > Activity Privacy).
 * Please attach cRPC.log and cRPC-crash.log when reporting a problem at

@@ -31,9 +31,16 @@ public:
 	// Makes sure a live game process is being tracked. Continuum restarts
 	// itself on launch, so the process we started may be replaced by a new one;
 	// this re-finds it by name. Returns false when no game process exists.
+	//
+	// The real client may refuse to be opened (its process is protected, or it
+	// runs as administrator). It is then followed by pid through the process
+	// list instead, and only window titles and the registry are used.
 	bool Track();
 	DWORD Pid() const { return pid_; }
-	HANDLE Process() const { return process_; }
+	// Handle that becomes signaled when the game exits, or null if unavailable.
+	HANDLE WaitHandle() const { return syncable_ ? process_ : nullptr; }
+	// Which game window has focus (cheap; fine to call every tick).
+	WindowKind Foreground() const;
 
 	WindowState Windows() const;
 	// True once the game has shown a window, i.e. it has finished starting up.
@@ -45,13 +52,33 @@ public:
 private:
 	void Release();
 	DWORD FindProcess() const;
+	bool Alive() const;
+	void LogAccess(DWORD pid) const;
 
 	const Config& cfg_;
-	HANDLE process_ = nullptr;
+	HANDLE process_ = nullptr;   // may be null if the game refuses access
+	bool syncable_ = false;      // process_ has SYNCHRONIZE
 	DWORD pid_ = 0;
 	DWORD stubPid_ = 0;          // the copy we launched (restarts itself)
 	ULONGLONG launchedAt_ = 0;
-	DWORD lastFailedPid_ = 0;    // avoid repeating the same log line
+};
+
+// Fallback ship detection for when the game's memory cannot be read: watches
+// the ship-select keys (Esc, then 1-8 or S), the same approach the original
+// cRPC used. Keys are only looked at while Continuum's game window has focus,
+// and nothing is hooked or recorded.
+class KeyShipTracker {
+public:
+	explicit KeyShipTracker(int initialShip) : ship_(initialShip) {}
+	// Call frequently (every tick). Returns true when the ship changed.
+	bool Update(bool gameFocused);
+	int Ship() const { return ship_; }
+
+private:
+	static constexpr int kKeys = 10;   // Esc, 1-8, S
+	bool down_[kKeys] = {};
+	bool menu_ = false;
+	int ship_;
 };
 
 WindowKind ClassifyWindowTitle(const wchar_t* title);

@@ -14,6 +14,7 @@
 // `fake_continuum --print-rva` prints the [Memory] overrides for cRPC.ini,
 // since the fake's globals cannot live at the real client's addresses.
 #include <windows.h>
+#include <aclapi.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -73,6 +74,40 @@ void EnterZone()
 	g_gamePointer = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(g_game));
 }
 
+// Like the real client in the user's report: refuse every OpenProcess from
+// other programs by replacing the process DACL with an empty one.
+void ProtectProcess()
+{
+	static ACL acl;
+	InitializeAcl(&acl, sizeof(acl), ACL_REVISION);
+	SetSecurityInfo(GetCurrentProcess(), SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+		nullptr, nullptr, &acl, nullptr);
+}
+
+// The real client keeps the selected zone and last ship here
+void WriteRegistry(const wchar_t* zone, DWORD ship)
+{
+	HKEY key;
+	if (RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Continuum\\State", 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+		return;
+	RegSetValueExW(key, L"Zone", 0, REG_SZ, reinterpret_cast<const BYTE*>(zone), static_cast<DWORD>((wcslen(zone) + 1) * sizeof(wchar_t)));
+	RegSetValueExW(key, L"Ship", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&ship), sizeof(ship));
+	RegCloseKey(key);
+}
+
+// A real key press as the player would make it (held long enough to be seen)
+void PressKey(WORD vk)
+{
+	INPUT in[1] = {};
+	in[0].type = INPUT_KEYBOARD;
+	in[0].ki.wVk = vk;
+	SendInput(1, in, sizeof(INPUT));
+	Sleep(250);
+	in[0].ki.dwFlags = KEYEVENTF_KEYUP;
+	SendInput(1, in, sizeof(INPUT));
+	Sleep(250);
+}
+
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcW(h, m, w, l); }
 
 // Keeps `wnd` in the foreground (a freshly started process may be refused
@@ -127,6 +162,11 @@ int main(int argc, char** argv)
 		return 0;
 	}
 
+	const bool protect = GetEnvironmentVariableW(L"FAKE_PROTECT", nullptr, 0) > 0;
+	if (protect)
+		ProtectProcess();
+	WriteRegistry(L"Trench Wars", 1);
+
 	WNDCLASSW wc{};
 	wc.lpfnWndProc = WndProc;
 	wc.hInstance = GetModuleHandleW(nullptr);
@@ -141,7 +181,15 @@ int main(int argc, char** argv)
 	Pump(wnd, 4000);
 
 	SetPlayer(1, "Purge", 11, 7, 1, 120, 2, 0x20);   // Shark, 2 flags, in safe
-	Pump(wnd, 4000);
+	if (protect)
+	{
+		// switch to Shark the way a player does: Esc opens the ship menu, 8 picks
+		PressKey(VK_ESCAPE);
+		PressKey('8');
+		Pump(wnd, 3000);
+	}
+	else
+		Pump(wnd, 4000);
 
 	DestroyWindow(wnd);
 	return 0;

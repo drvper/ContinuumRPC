@@ -49,6 +49,9 @@ const wchar_t* const kDefaultIni =
 	L"ResetTimerOnShipChange=0\r\n"
 	L"; 1 = show an elapsed timer while in the zone list\r\n"
 	L"ShowLauncherTimer=0\r\n"
+	L"; If the game's memory cannot be read: 1 = follow the ship-select keys\r\n"
+	L"; (Esc then 1-8 or S, only while the game has focus) to show your ship\r\n"
+	L"GuessShipFromKeys=1\r\n"
 	L"; Status text shown in member lists: 0 = \"Playing Subspace Continuum\",\r\n"
 	L"; 1 = your status line (e.g. \"Playing Warbird\"), 2 = the zone name\r\n"
 	L"StatusDisplay=0\r\n"
@@ -164,6 +167,7 @@ void Config::Load(const std::wstring& path)
 	s.showPartySize = ReadBool(path, p, L"ShowPartySize", s.showPartySize);
 	s.resetTimerOnShipChange = ReadBool(path, p, L"ResetTimerOnShipChange", s.resetTimerOnShipChange);
 	s.showLauncherTimer = ReadBool(path, p, L"ShowLauncherTimer", s.showLauncherTimer);
+	s.guessShipFromKeys = ReadBool(path, p, L"GuessShipFromKeys", s.guessShipFromKeys);
 	s.statusDisplay = static_cast<int>(ReadNumber(path, p, L"StatusDisplay", static_cast<std::uint64_t>(s.statusDisplay)));
 	if (s.statusDisplay < kStatusName || s.statusDisplay > kStatusDetails)
 		s.statusDisplay = kStatusName;

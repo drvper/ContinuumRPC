@@ -45,7 +45,8 @@ bool GameMemory::Attach(DWORD pid)
 	handle_ = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
 	if (!handle_)
 	{
-		Log("memory: OpenProcess(%lu) failed, error %lu", pid, GetLastError());
+		Log("memory: cannot open pid %lu for reading, error %lu%s", pid, GetLastError(),
+			GetLastError() == ERROR_ACCESS_DENIED ? " (access denied by the game)" : "");
 		return false;
 	}
 	pid_ = pid;

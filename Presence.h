@@ -83,6 +83,8 @@ struct PresenceSettings {
 	bool showLauncherTimer = false;
 	int statusDisplay = kStatusName;
 	std::vector<PresenceButton> buttons;
+	// When memory cannot be read: follow the ship-select keys (Esc, 1-8, S)
+	bool guessShipFromKeys = true;
 };
 
 // Discord's limit for most activity strings is 128 bytes including the NUL.

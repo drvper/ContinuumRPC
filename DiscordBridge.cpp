@@ -226,7 +226,8 @@ std::string Describe(const GameSnapshot& s, const GameMemory::Result& r)
 	return buf;
 }
 
-GameSnapshot TakeSnapshot(const Config& cfg, GameClient& game, GameMemory& memory, GameMemory::Result& mem)
+GameSnapshot TakeSnapshot(const Config& cfg, GameClient& game, GameMemory& memory, const KeyShipTracker* keys,
+	GameMemory::Result& mem)
 {
 	GameSnapshot snap;
 	snap.zone = WideToUtf8(GameClient::RegistryString(L"Zone"));
@@ -255,11 +256,14 @@ GameSnapshot TakeSnapshot(const Config& cfg, GameClient& game, GameMemory& memor
 		snap.focused = ws.foreground != WindowKind::None;
 	}
 
-	// Without memory the best we know is the last ship saved in the registry
+	// Without memory: the ship picked with the keyboard, else the last ship
+	// saved in the registry
 	if (snap.screen != Screen::Launcher && !snap.memoryValid)
 	{
 		DWORD ship = 0;
-		if (GameClient::RegistryDword(L"Ship", ship) && ship <= kSpectator)
+		if (keys && keys->Ship() >= 0)
+			snap.ship = keys->Ship();
+		else if (GameClient::RegistryDword(L"Ship", ship) && ship <= kSpectator)
 			snap.ship = static_cast<int>(ship);
 	}
 	return snap;
@@ -315,6 +319,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	DiscordClient discord(cfg.clientId);
 	GameMemory memory(cfg.offsets);
 	PresenceBuilder builder;
+	DWORD initialShip = 0;
+	KeyShipTracker keys(GameClient::RegistryDword(L"Ship", initialShip) && initialShip <= kSpectator
+		? static_cast<int>(initialShip) : kShipUnknown);
+	DWORD memoryTriedPid = 0;   // memory is attached at most once per game process
 
 	const ULONGLONG started = GetTickCount64();
 	ULONGLONG lastSeen = 0;
@@ -337,11 +345,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 					lastSeen = now;
 					// Attach only once the client is up (has a window), never
 					// while it is still starting
-					if (cfg.memoryReading && memory.Pid() != game.Pid() && game.HasWindow())
-						memory.Attach(game.Pid());
+					if (cfg.memoryReading && memoryTriedPid != game.Pid() && game.HasWindow())
+					{
+						memoryTriedPid = game.Pid();
+						if (!memory.Attach(game.Pid()))
+							Log("memory: not available, using window titles, the registry%s instead",
+								cfg.presence.guessShipFromKeys ? " and the ship-select keys" : "");
+					}
 
 					GameMemory::Result mem;
-					GameSnapshot snap = TakeSnapshot(cfg, game, memory, mem);
+					const bool useKeys = cfg.presence.guessShipFromKeys && !memory.Attached();
+					GameSnapshot snap = TakeSnapshot(cfg, game, memory, useKeys ? &keys : nullptr, mem);
 					discord.SetPresence(builder.Build(snap, cfg.presence, static_cast<std::int64_t>(std::time(nullptr))));
 
 					if (cfg.debugLog)
@@ -358,8 +372,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 						Log("game: waiting for %s to start", WideToUtf8(cfg.gameExecutable).c_str());
 					waitingLogged = true;
 					memory.Detach();
-					if (lastSeen ? now - lastSeen > kLostGraceMs : now - started > cfg.startupTimeoutSec * 1000ULL)
-						break; // the game was closed (or never started)
+					if (lastSeen && now - lastSeen > kLostGraceMs)
+					{
+						Log("exiting: the game was closed");
+						break;
+					}
+					if (!lastSeen && now - started > cfg.startupTimeoutSec * 1000ULL)
+					{
+						Log("exiting: %s did not start within %u s", WideToUtf8(cfg.gameExecutable).c_str(), cfg.startupTimeoutSec);
+						break;
+					}
 				}
 			}
 			catch (const std::exception& e)
@@ -371,6 +393,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
 		discord.Tick();
 
+		// Ship-select keys are short presses, so they are checked every tick
+		if (cfg.presence.guessShipFromKeys && game.Pid() && !memory.Attached() &&
+			keys.Update(game.Foreground() == WindowKind::Game))
+		{
+			Log("keys: ship changed to %s", ShipName(keys.Ship()));
+			nextPoll = 0; // show it right away
+		}
+
 		if (cfg.debugLog && now >= nextHeartbeat)
 		{
 			nextHeartbeat = now + 10000;
@@ -379,16 +409,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 		}
 
 		// Sleep until the next tick, waking immediately if the game exits
-		if (game.Process())
+		if (game.WaitHandle())
 		{
-			if (WaitForSingleObject(game.Process(), kTickMs) == WAIT_OBJECT_0)
+			if (WaitForSingleObject(game.WaitHandle(), kTickMs) == WAIT_OBJECT_0)
 				nextPoll = 0; // re-track right away instead of spinning on a signaled handle
 		}
 		else
 			Sleep(kTickMs);
 	}
 
-	Log("exiting: the game is no longer running");
 	discord.Shutdown();
 	if (instance)
 		CloseHandle(instance);

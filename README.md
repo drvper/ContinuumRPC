@@ -29,6 +29,9 @@ cRPC reads the game state directly from the Continuum client's memory (read-only
 | Tabbed out | *Chatting* in the windowed chat, or *Idle* while you are away, without resetting your timer |
 | Elapsed time | Time spent in the current zone (optionally restarts when you switch ships) |
 
+#### When the game cannot be read
+Some Continuum installs do not allow other programs to open the game process (`cRPC.log` then shows `access denied by the game`). cRPC detects this and switches to the same sources the original cRPC used: window titles for the zone list / playing / chatting / idle state, the registry for the zone name and your last ship, and the ship-select keys (Esc, then 1-8 or S) while the game window has focus to follow ship changes (`GuessShipFromKeys`). Frequency, bounty, flags, safe zone, map, population and team size need memory access and are left out in this mode.
+
 Other details:
 * cRPC talks to the Discord app directly over its local RPC pipe (`\\.\pipe\discord-ipc-N`), so no Discord SDK DLL is needed.
 * Presence clears as soon as the game is closed, and cRPC reconnects automatically if Discord is started or restarted after the game.
@@ -45,6 +48,7 @@ ShowPlayerName=0   ; your player name is hidden by default
 ShowZone=1         ; 0 shows "In a zone" instead of the zone name
 ShowPartySize=1    ; the "(x of y)" team counter
 ResetTimerOnShipChange=0
+GuessShipFromKeys=1  ; follow Esc + 1-8/S when memory cannot be read
 StatusDisplay=0    ; 1 = show your ship, 2 = show the zone in member lists
 
 [Buttons]
