@@ -193,6 +193,30 @@ static void TestTruncation()
 	EXPECT_TRUE(m.partyId.size() <= kMaxActivityString);
 }
 
+static void TestButtonsAndStatusDisplay()
+{
+	PresenceBuilder b;
+	PresenceSettings cfg;
+	cfg.statusDisplay = kStatusDetails;
+	cfg.buttons.push_back({ "Play Subspace Continuum", "https://store.steampowered.com/app/352700/" });
+	cfg.buttons.push_back({ "Bad", "javascript:alert(1)" });                 // rejected
+	cfg.buttons.push_back({ "Zone site", "https://example.com/zone" });
+	cfg.buttons.push_back({ "Third", "https://example.com/3" });             // only two allowed
+	PresenceModel m = b.Build(InZone(), cfg, 0);
+	EXPECT_EQ(m.statusDisplay, static_cast<int>(kStatusDetails));
+	EXPECT_EQ(m.buttons.size(), static_cast<std::size_t>(2));
+	EXPECT_EQ(m.buttons[1].label, std::string("Zone site"));
+
+	// buttons are shown in the launcher too
+	GameSnapshot s;
+	EXPECT_EQ(b.Build(s, cfg, 0).buttons.size(), static_cast<std::size_t>(2));
+
+	EXPECT_TRUE(IsValidButton({ std::string(32, 'a'), "https://x.y" }));
+	EXPECT_TRUE(!IsValidButton({ std::string(33, 'a'), "https://x.y" }));
+	EXPECT_TRUE(IsValidButton({ "Ã©Ã©", "http://x.y" }));  // counted in characters, not bytes
+	EXPECT_TRUE(!IsValidButton({ "ok", "https://" + std::string(510, 'u') }));
+}
+
 static void TestEquality()
 {
 	PresenceBuilder b;
@@ -214,6 +238,7 @@ int main()
 	TestLauncher();
 	TestFallbackWithoutMemory();
 	TestTruncation();
+	TestButtonsAndStatusDisplay();
 	TestEquality();
 	if (g_failures)
 	{

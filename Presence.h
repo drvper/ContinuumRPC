@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace crpc {
 
@@ -55,6 +56,18 @@ struct GameSnapshot {
 	int teamPlayers = 0;        // players on our frequency (including us)
 };
 
+// A clickable link button on the presence (Discord shows up to two to other users).
+struct PresenceButton {
+	std::string label;  // 1-32 characters
+	std::string url;    // http(s), at most 512 characters
+
+	bool operator==(const PresenceButton& o) const { return label == o.label && url == o.url; }
+};
+
+// Which field Discord shows as the status text in member lists:
+// 0 = "Playing Subspace Continuum", 1 = the state line, 2 = the details line (zone)
+enum StatusDisplay : int { kStatusName = 0, kStatusState = 1, kStatusDetails = 2 };
+
 // User facing options, loaded from cRPC.ini
 struct PresenceSettings {
 	bool showZone = true;           // false hides the zone name ("In a zone")
@@ -68,6 +81,8 @@ struct PresenceSettings {
 	bool showPartySize = true;      // Discord's "(x of y)" next to the state line
 	bool resetTimerOnShipChange = false;
 	bool showLauncherTimer = false;
+	int statusDisplay = kStatusName;
+	std::vector<PresenceButton> buttons;
 };
 
 // Discord's limit for most activity strings is 128 bytes including the NUL.
@@ -86,6 +101,8 @@ struct PresenceModel {
 	int partyMax = 0;
 	std::int64_t startTimestamp = 0;   // unix seconds, 0 = no timer
 	bool instance = false;             // true while actually inside a zone
+	int statusDisplay = kStatusName;
+	std::vector<PresenceButton> buttons;
 
 	bool operator==(const PresenceModel& o) const;
 	bool operator!=(const PresenceModel& o) const { return !(*this == o); }
@@ -108,6 +125,10 @@ const char* ShipName(int ship);
 const char* ShipImageKey(int ship);
 // Truncates to at most maxBytes without splitting a UTF-8 code point.
 std::string TruncateUtf8(const std::string& s, std::size_t maxBytes = kMaxActivityString);
+// Number of code points in a UTF-8 string.
+std::size_t Utf8Length(const std::string& s);
+// True if Discord will accept the button (label 1-32 characters, http(s) url up to 512).
+bool IsValidButton(const PresenceButton& b);
 
 } // namespace crpc
 

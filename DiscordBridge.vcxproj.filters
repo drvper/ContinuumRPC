@@ -3,27 +3,18 @@
   <ItemGroup>
     <Filter Include="Source Files">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
-      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+      <Extensions>cpp;c;cc;cxx</Extensions>
     </Filter>
     <Filter Include="Header Files">
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
-      <Extensions>h;hh;hpp;hxx;hm;inl;inc;xsd</Extensions>
+      <Extensions>h;hh;hpp;hxx</Extensions>
     </Filter>
     <Filter Include="Resource Files">
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
-      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
-    </Filter>
-    <Filter Include="Source Files\Discord SDK">
-      <UniqueIdentifier>{907d1767-5434-42ee-87c2-b318f228b72e}</UniqueIdentifier>
+      <Extensions>rc;ico;ini</Extensions>
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Resource.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DiscordBridge.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Activity.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -33,66 +24,36 @@
     <ClInclude Include="Continuum.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="DiscordBridge.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DiscordRpc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="GameMemory.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Presence.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Resource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="DiscordBridge.cpp">
+    <ClCompile Include="Activity.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="discordsdk\types.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\overlay_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\achievement_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\network_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\lobby_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\core.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\relationship_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\store_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\activity_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\voice_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\user_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\application_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\storage_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="discordsdk\image_manager.cpp">
-      <Filter>Source Files\Discord SDK</Filter>
-    </ClCompile>
-    <ClCompile Include="Activity.cpp">
+    <ClCompile Include="Config.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Continuum.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Config.cpp">
+    <ClCompile Include="DiscordBridge.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DiscordRpc.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="GameMemory.cpp">
@@ -108,14 +69,13 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="cRPC.ini" />
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="small.ico">
-      <Filter>Resource Files</Filter>
-    </Image>
     <Image Include="DiscordBridge.ico">
       <Filter>Resource Files</Filter>
     </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="cRPC.ini">
+      <Filter>Resource Files</Filter>
+    </None>
   </ItemGroup>
 </Project>

@@ -37,7 +37,6 @@ public:
 
 	WindowState Windows() const;
 
-	static bool IsSteam();
 	static std::wstring RegistryString(const wchar_t* name);
 	static bool RegistryDword(const wchar_t* name, DWORD& out);
 

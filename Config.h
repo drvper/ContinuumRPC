@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "Presence.h"
 
@@ -56,8 +57,11 @@ struct Config {
 	bool memoryReading = true;
 	MemoryOffsets offsets;
 
-	// [Presence]
+	// [Presence] and [Buttons]
 	PresenceSettings presence;
+
+	// Problems found while loading (logged once the log file is open)
+	std::vector<std::string> warnings;
 
 	// Loads values from `path`, keeping the defaults above for anything missing.
 	void Load(const std::wstring& path);

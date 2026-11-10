@@ -12,12 +12,43 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
+#include <exception>
 
 namespace crpc {
 
 namespace {
 FILE* g_log = nullptr;
+wchar_t g_crashLogPath[MAX_PATH];
+
+// Last-resort diagnostics: if cRPC ever crashes, record where so it can be
+// fixed. Only uses stack memory and plain Win32 calls (the heap may be broken).
+LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info)
+{
+	const EXCEPTION_RECORD* rec = info->ExceptionRecord;
+	wchar_t module[MAX_PATH] = L"?";
+	HMODULE mod = nullptr;
+	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		static_cast<LPCWSTR>(rec->ExceptionAddress), &mod))
+		GetModuleFileNameW(mod, module, MAX_PATH);
+
+	char text[1024];
+	int len = wsprintfA(text, "cRPC " CRPC_VERSION " crashed\r\nexception 0x%08lX at 0x%08lX (%ls + 0x%lX)\r\n",
+		rec->ExceptionCode, static_cast<unsigned long>(reinterpret_cast<std::uintptr_t>(rec->ExceptionAddress)), module,
+		static_cast<unsigned long>(reinterpret_cast<std::uintptr_t>(rec->ExceptionAddress) - reinterpret_cast<std::uintptr_t>(mod)));
+
+	HANDLE f = CreateFileW(g_crashLogPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (f != INVALID_HANDLE_VALUE)
+	{
+		DWORD written = 0;
+		WriteFile(f, text, static_cast<DWORD>(len), &written, nullptr);
+		CloseHandle(f);
+	}
+	if (g_log)
+		fprintf(g_log, "%s", text);
+	return EXCEPTION_EXECUTE_HANDLER; // exit quietly; Discord drops the presence when the pipe closes
+}
 }
 
 std::string WideToUtf8(const std::wstring& wstr)
@@ -27,6 +58,16 @@ std::string WideToUtf8(const std::wstring& wstr)
 	int size = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()), nullptr, 0, nullptr, nullptr);
 	std::string out(size, '\0');
 	WideCharToMultiByte(CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()), &out[0], size, nullptr, nullptr);
+	return out;
+}
+
+std::wstring Utf8ToWide(const std::string& str)
+{
+	if (str.empty())
+		return std::wstring();
+	int size = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), nullptr, 0);
+	std::wstring out(size, L'\0');
+	MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), &out[0], size);
 	return out;
 }
 
@@ -43,8 +84,8 @@ std::string AnsiToUtf8(const char* str, std::size_t maxLen)
 
 void LogOpen(const std::wstring& path)
 {
-	if (!g_log)
-		g_log = _wfopen(path.c_str(), L"w");
+	if (!g_log && _wfopen_s(&g_log, path.c_str(), L"w") != 0)
+		g_log = nullptr;
 }
 
 void Log(const char* fmt, ...)
@@ -131,12 +172,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	using namespace crpc;
 
 	const std::wstring dir = ExeDirectory();
+	lstrcpynW(g_crashLogPath, (dir + L"cRPC-crash.log").c_str(), MAX_PATH);
+	SetUnhandledExceptionFilter(CrashFilter);
+
 	const std::wstring ini = dir + L"cRPC.ini";
 	Config::WriteDefault(ini);
 	Config cfg;
 	cfg.Load(ini);
 	if (cfg.debugLog)
 		LogOpen(dir + L"cRPC.log");
+	Log("cRPC %s", CRPC_VERSION);
+	for (const std::string& w : cfg.warnings)
+		Log("config: %s", w.c_str());
 
 	GameClient game(cfg);
 
@@ -149,7 +196,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	if (!primary)
 		return 0;
 
-	DiscordClient discord(cfg.clientId, GameClient::IsSteam());
+	DiscordClient discord(cfg.clientId);
 	GameMemory memory(cfg.offsets);
 	PresenceBuilder builder;
 
@@ -165,30 +212,37 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 		if (now >= nextPoll)
 		{
 			nextPoll = now + cfg.pollIntervalMs;
-
-			if (game.Track())
+			try
 			{
-				lastSeen = now;
-				if (cfg.memoryReading && memory.Pid() != game.Pid())
-					memory.Attach(game.Pid());
-
-				GameMemory::Result mem;
-				GameSnapshot snap = TakeSnapshot(cfg, game, memory, mem);
-				discord.SetPresence(builder.Build(snap, cfg.presence, static_cast<std::int64_t>(std::time(nullptr))));
-
-				if (cfg.debugLog)
+				if (game.Track())
 				{
-					std::string d = Describe(snap, mem);
-					if (d != lastDescription)
-						Log("state: %s", d.c_str());
-					lastDescription.swap(d);
+					lastSeen = now;
+					if (cfg.memoryReading && memory.Pid() != game.Pid())
+						memory.Attach(game.Pid());
+
+					GameMemory::Result mem;
+					GameSnapshot snap = TakeSnapshot(cfg, game, memory, mem);
+					discord.SetPresence(builder.Build(snap, cfg.presence, static_cast<std::int64_t>(std::time(nullptr))));
+
+					if (cfg.debugLog)
+					{
+						std::string d = Describe(snap, mem);
+						if (d != lastDescription)
+							Log("state: %s", d.c_str());
+						lastDescription.swap(d);
+					}
+				}
+				else
+				{
+					memory.Detach();
+					if (lastSeen ? now - lastSeen > kLostGraceMs : now - started > cfg.startupTimeoutSec * 1000ULL)
+						break; // the game was closed (or never started)
 				}
 			}
-			else
+			catch (const std::exception& e)
 			{
-				memory.Detach();
-				if (lastSeen ? now - lastSeen > kLostGraceMs : now - started > cfg.startupTimeoutSec * 1000ULL)
-					break; // the game was closed (or never started)
+				// never take the presence down over one bad sample
+				Log("error while sampling the game: %s", e.what());
 			}
 		}
 

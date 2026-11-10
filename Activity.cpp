@@ -1,90 +1,158 @@
 // Activity.cpp - see Activity.h
 #include "Activity.h"
-#include "Config.h"
+#include "DiscordRpc.h"
 
 namespace crpc {
 
 namespace {
 
 constexpr ULONGLONG kMinUpdateIntervalMs = 4000;   // 5 updates per 20 s
-constexpr ULONGLONG kReconnectIntervalMs = 15000;
-constexpr std::int64_t kSteamAppId = 352700;
-
-discord::Activity ToActivity(const PresenceModel& m)
-{
-	discord::Activity a{};
-	a.SetType(discord::ActivityType::Playing);
-	a.SetDetails(m.details.c_str());
-	a.SetState(m.state.c_str());
-	a.GetAssets().SetLargeImage(m.largeImage.c_str());
-	a.GetAssets().SetLargeText(m.largeText.c_str());
-	a.GetAssets().SetSmallImage(m.smallImage.c_str());
-	a.GetAssets().SetSmallText(m.smallText.c_str());
-	a.GetTimestamps().SetStart(m.startTimestamp);
-	if (!m.partyId.empty() && m.partySize > 0 && m.partyMax >= m.partySize)
-	{
-		a.GetParty().SetId(m.partyId.c_str());
-		a.GetParty().GetSize().SetCurrentSize(m.partySize);
-		a.GetParty().GetSize().SetMaxSize(m.partyMax);
-	}
-	a.SetInstance(m.instance);
-	return a;
-}
+constexpr ULONGLONG kReconnectIntervalMs = 10000;
+constexpr ULONGLONG kReplyTimeoutMs = 10000;
+constexpr int kMaxPipes = 10;                      // discord-ipc-0 .. discord-ipc-9
 
 } // namespace
 
-DiscordClient::DiscordClient(std::int64_t clientId, bool steam) : clientId_(clientId), steam_(steam)
+DiscordClient::DiscordClient(std::int64_t clientId) : clientId_(clientId)
 {
-	Connect();
 }
 
 DiscordClient::~DiscordClient()
 {
-	core_.reset();
+	if (pipe_ != INVALID_HANDLE_VALUE)
+		CloseHandle(pipe_);
 }
 
 bool DiscordClient::Connect()
 {
 	nextConnect_ = GetTickCount64() + kReconnectIntervalMs;
 
-	discord::Core* core = nullptr;
-	discord::Result result = discord::Core::Create(clientId_, DiscordCreateFlags_NoRequireDiscord, &core);
-	if (result != discord::Result::Ok || !core)
+	for (int i = 0; i < kMaxPipes && pipe_ == INVALID_HANDLE_VALUE; ++i)
 	{
-		// Discord is probably not running; try again later
-		Log("discord: connect failed (%d)", static_cast<int>(result));
+		wchar_t name[64];
+		swprintf(name, _countof(name), L"\\\\.\\pipe\\discord-ipc-%d", i);
+		pipe_ = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+	}
+	if (pipe_ == INVALID_HANDLE_VALUE)
+		return false; // Discord is not running; try again later
+
+	rx_.clear();
+	state_ = State::Handshaking;
+	deadline_ = GetTickCount64() + kReplyTimeoutMs;
+	if (!Send(rpc::kHandshake, rpc::HandshakeJson(clientId_)))
 		return false;
-	}
-	core_.reset(core);
-
-	core_->SetLogHook(discord::LogLevel::Warn, [](discord::LogLevel level, const char* message) {
-		Log("discord sdk [%d]: %s", static_cast<int>(level), message);
-	});
-
-	// Lets Discord launch the game (e.g. from the game library)
-	if (steam_)
-		core_->ActivityManager().RegisterSteam(kSteamAppId);
-	else
-	{
-		wchar_t path[MAX_PATH];
-		DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
-		std::string command = "\"" + WideToUtf8(std::wstring(path, len)) + "\"";
-		core_->ActivityManager().RegisterCommand(command.c_str());
-	}
-
-	Log("discord: connected");
-	haveSent_ = false; // the new connection has no activity yet
-	inFlight_ = false;
+	Log("discord: pipe opened, handshake sent");
 	return true;
 }
 
 void DiscordClient::Disconnect(const char* reason)
 {
-	Log("discord: disconnected (%s)", reason);
-	core_.reset();
-	haveSent_ = false;
-	inFlight_ = false;
+	if (pipe_ != INVALID_HANDLE_VALUE)
+	{
+		Log("discord: disconnected (%s)", reason);
+		CloseHandle(pipe_);
+	}
+	pipe_ = INVALID_HANDLE_VALUE;
+	state_ = State::Disconnected;
+	haveSent_ = false;         // a new connection starts without a presence
+	inFlightNonce_.clear();
+	rx_.clear();
 	nextConnect_ = GetTickCount64() + kReconnectIntervalMs;
+}
+
+bool DiscordClient::Send(std::uint32_t opcode, const std::string& json)
+{
+	const std::string frame = rpc::EncodeFrame(static_cast<rpc::Opcode>(opcode), json);
+	DWORD written = 0;
+	if (!WriteFile(pipe_, frame.data(), static_cast<DWORD>(frame.size()), &written, nullptr) || written != frame.size())
+	{
+		Disconnect("write failed");
+		return false;
+	}
+	return true;
+}
+
+void DiscordClient::Receive()
+{
+	// Only read what is already there so the loop never blocks
+	for (;;)
+	{
+		DWORD available = 0;
+		if (!PeekNamedPipe(pipe_, nullptr, 0, nullptr, &available, nullptr))
+		{
+			Disconnect("Discord closed the connection");
+			return;
+		}
+		if (!available)
+			break;
+
+		char buf[4096];
+		DWORD read = 0;
+		if (!ReadFile(pipe_, buf, available < sizeof(buf) ? available : static_cast<DWORD>(sizeof(buf)), &read, nullptr) || !read)
+		{
+			Disconnect("read failed");
+			return;
+		}
+		rx_.append(buf, read);
+	}
+
+	rpc::Frame frame;
+	long used;
+	while ((used = rpc::DecodeFrame(rx_, frame)) > 0)
+	{
+		rx_.erase(0, static_cast<std::size_t>(used));
+		OnFrame(frame.opcode, frame.json);
+		if (state_ == State::Disconnected)
+			return;
+	}
+	if (used < 0)
+		Disconnect("corrupt data");
+}
+
+void DiscordClient::OnFrame(std::uint32_t opcode, const std::string& json)
+{
+	switch (opcode)
+	{
+	case rpc::kPing:
+		Send(rpc::kPong, json);
+		return;
+	case rpc::kClose:
+		// e.g. {"code":4000,"message":"Invalid Client ID"}
+		Log("discord: closed by Discord: %s", json.c_str());
+		Disconnect("closed by Discord");
+		return;
+	case rpc::kFrame:
+		break;
+	default:
+		return;
+	}
+
+	const std::string evt = rpc::JsonStringField(json, "evt");
+	if (state_ == State::Handshaking)
+	{
+		if (evt == "READY")
+		{
+			state_ = State::Connected;
+			Log("discord: connected");
+		}
+		return;
+	}
+
+	const std::string nonce = rpc::JsonStringField(json, "nonce");
+	if (nonce.empty() || nonce != inFlightNonce_)
+		return;
+	inFlightNonce_.clear();
+
+	if (evt == "ERROR")
+	{
+		Log("discord: SET_ACTIVITY rejected: %s", json.c_str());
+		haveSent_ = false; // retried after the rate limit interval
+	}
+	else
+	{
+		sent_ = pending_;
+		haveSent_ = true;
+	}
 }
 
 void DiscordClient::SetPresence(const PresenceModel& model)
@@ -95,66 +163,60 @@ void DiscordClient::SetPresence(const PresenceModel& model)
 
 void DiscordClient::Flush()
 {
-	if (!core_ || !haveDesired_ || inFlight_)
+	if (state_ != State::Connected || !haveDesired_)
 		return;
+
+	const ULONGLONG now = GetTickCount64();
+	if (!inFlightNonce_.empty())
+	{
+		if (now < deadline_)
+			return;
+		inFlightNonce_.clear(); // no reply; send again
+	}
 	if (haveSent_ && desired_ == sent_)
 		return;
-
-	ULONGLONG now = GetTickCount64();
 	if (lastSend_ && now - lastSend_ < kMinUpdateIntervalMs)
-		return; // keep the latest model queued until the rate limit allows it
+		return; // the latest model stays queued until the rate limit allows it
 
+	pending_ = desired_;
+	inFlightNonce_ = std::to_string(++nonceCounter_);
 	lastSend_ = now;
-	inFlight_ = true;
-	PresenceModel sending = desired_;
-	core_->ActivityManager().UpdateActivity(ToActivity(sending), [this, sending](discord::Result result) {
-		inFlight_ = false;
-		if (result == discord::Result::Ok)
-		{
-			sent_ = sending;
-			haveSent_ = true;
-		}
-		else
-		{
-			Log("discord: UpdateActivity failed (%d)", static_cast<int>(result));
-			haveSent_ = false; // retried after the rate limit interval
-		}
-	});
+	deadline_ = now + kReplyTimeoutMs;
+	Send(rpc::kFrame, rpc::SetActivityJson(&pending_, GetCurrentProcessId(), inFlightNonce_));
 }
 
 void DiscordClient::Tick()
 {
-	if (!core_)
+	if (state_ == State::Disconnected)
 	{
-		if (GetTickCount64() >= nextConnect_)
-			Connect();
-		if (!core_)
+		if (GetTickCount64() < nextConnect_ || !Connect())
 			return;
 	}
 
-	discord::Result result = core_->RunCallbacks();
-	if (result != discord::Result::Ok)
-	{
-		Disconnect(result == discord::Result::NotRunning ? "Discord closed" : "callback error");
-		return;
-	}
+	Receive();
+	if (state_ == State::Handshaking && GetTickCount64() > deadline_)
+		Disconnect("handshake timed out");
 	Flush();
 }
 
 void DiscordClient::Shutdown()
 {
-	if (!core_)
-		return;
-
-	bool done = false;
-	core_->ActivityManager().ClearActivity([&done](discord::Result) { done = true; });
-	for (int i = 0; i < 20 && !done; ++i)
+	if (state_ == State::Connected)
 	{
-		if (core_->RunCallbacks() != discord::Result::Ok)
-			break;
-		Sleep(25);
+		Send(rpc::kFrame, rpc::SetActivityJson(nullptr, GetCurrentProcessId(), "clear"));
+		// give Discord a moment to apply it before the pipe closes
+		for (int i = 0; i < 10 && state_ == State::Connected; ++i)
+		{
+			DWORD available = 0;
+			if (!PeekNamedPipe(pipe_, nullptr, 0, nullptr, &available, nullptr) || available)
+				break;
+			Sleep(20);
+		}
 	}
-	core_.reset();
+	if (pipe_ != INVALID_HANDLE_VALUE)
+		CloseHandle(pipe_);
+	pipe_ = INVALID_HANDLE_VALUE;
+	state_ = State::Disconnected;
 }
 
 } // namespace crpc

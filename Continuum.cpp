@@ -195,17 +195,6 @@ WindowState GameClient::Windows() const
 	return ws;
 }
 
-bool GameClient::IsSteam()
-{
-	// Steam sets SteamAppId for the games it launches
-	if (GetEnvironmentVariableW(L"SteamAppId", nullptr, 0) > 0)
-		return true;
-	std::wstring dir = ExeDirectory();
-	for (auto& c : dir)
-		c = static_cast<wchar_t>(towlower(c));
-	return dir.find(L"steamapps") != std::wstring::npos || dir.find(L"steam") != std::wstring::npos;
-}
-
 std::wstring GameClient::RegistryString(const wchar_t* name)
 {
 	wchar_t buf[256];

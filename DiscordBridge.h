@@ -20,10 +20,13 @@
 #include <string>
 
 
+#define CRPC_VERSION "2.0.0"
+
 namespace crpc {
 
 // UTF-16 -> UTF-8 (Discord expects UTF-8 strings)
 std::string WideToUtf8(const std::wstring& wstr);
+std::wstring Utf8ToWide(const std::string& str);
 // Continuum stores names in the Windows-1252 code page -> UTF-8
 std::string AnsiToUtf8(const char* str, std::size_t maxLen);
 

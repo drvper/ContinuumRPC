@@ -39,7 +39,8 @@ bool PresenceModel::operator==(const PresenceModel& o) const
 	return details == o.details && state == o.state && largeImage == o.largeImage &&
 		largeText == o.largeText && smallImage == o.smallImage && smallText == o.smallText &&
 		partyId == o.partyId && partySize == o.partySize && partyMax == o.partyMax &&
-		startTimestamp == o.startTimestamp && instance == o.instance;
+		startTimestamp == o.startTimestamp && instance == o.instance &&
+		statusDisplay == o.statusDisplay && buttons == o.buttons;
 }
 
 const char* ShipName(int ship)
@@ -71,6 +72,22 @@ std::string TruncateUtf8(const std::string& s, std::size_t maxBytes)
 	while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80)
 		--cut;
 	return s.substr(0, cut);
+}
+
+std::size_t Utf8Length(const std::string& s)
+{
+	std::size_t n = 0;
+	for (unsigned char c : s)
+		if ((c & 0xC0) != 0x80)
+			++n;
+	return n;
+}
+
+bool IsValidButton(const PresenceButton& b)
+{
+	std::size_t label = Utf8Length(b.label);
+	bool http = b.url.compare(0, 7, "http://") == 0 || b.url.compare(0, 8, "https://") == 0;
+	return label >= 1 && label <= 32 && http && b.url.size() <= 512;
 }
 
 std::int64_t PresenceBuilder::PhaseStart(const std::string& key, std::int64_t now)
@@ -196,6 +213,11 @@ PresenceModel PresenceBuilder::Build(const GameSnapshot& snap, const PresenceSet
 			phase += ":" + std::to_string(ship);
 		m.startTimestamp = PhaseStart(phase, now);
 	}
+
+	m.statusDisplay = cfg.statusDisplay;
+	for (const PresenceButton& b : cfg.buttons)
+		if (m.buttons.size() < 2 && IsValidButton(b))
+			m.buttons.push_back(b);
 
 	m.details = TruncateUtf8(m.details);
 	m.state = TruncateUtf8(m.state);

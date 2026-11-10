@@ -1,0 +1,62 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Release build (MSVC, Win32)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        run: msbuild DiscordBridge.sln /m /p:Configuration=Release /p:Platform=x86
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Unit tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /W3 /I. tests\presence_tests.cpp Presence.cpp /Fe:presence_tests.exe && presence_tests.exe
+          cl /nologo /std:c++17 /EHsc /W3 /I. tests\rpc_tests.cpp DiscordRpc.cpp Presence.cpp /Fe:rpc_tests.exe && rpc_tests.exe
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item Release\Continuum.exe, cRPC.ini, INSTALL.txt, LICENSE dist\
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cRPC
+          path: dist
+
+  linux:
+    name: Tests (unit + Wine integration)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unit tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -I. tests/presence_tests.cpp Presence.cpp -o presence_tests && ./presence_tests
+          g++ -std=c++17 -Wall -Wextra -I. tests/rpc_tests.cpp DiscordRpc.cpp Presence.cpp -o rpc_tests && ./rpc_tests
+
+      - name: Install MinGW and Wine
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq g++-mingw-w64-i686 wine wine32:i386 xvfb
+
+      - name: Integration test
+        run: tests/integration/run.sh "$RUNNER_TEMP/crpc"

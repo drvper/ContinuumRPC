@@ -13,7 +13,7 @@ Continuum RPC (cRPC) is a plugin used alongside the normal Continuum game execut
 * Simply download the game on [Steam](https://store.steampowered.com/app/352700/Subspace_Continuum) and enable the **Beta** release.
 ### Legacy Users
 * Download the latest official release from [here](https://github.com/purge-dev/ContinuumRPC/releases).
-* Unzip the contents into your main Continuum folder, overwriting your Continuum.exe (you can make a backup if you wish).
+* Rename your original `Continuum.exe` to `Continuum_main.exe`, then unzip `Continuum.exe` and `cRPC.ini` into your main Continuum folder. If you are upgrading from an older cRPC, just overwrite `Continuum.exe` (and delete the no longer needed `discord_game_sdk.dll`). See `INSTALL.txt` in the zip for details.
 * Run the game as usual. Any existing shortcuts/launch options you made will still work, and all game platforms on **Windows** are supported. This may also work in **MacOS** and **Linux** using [Wine](https://www.winehq.org/) (untested).
 
 ## Features
@@ -30,8 +30,10 @@ cRPC reads the game state directly from the Continuum client's memory (read-only
 | Elapsed time | Time spent in the current zone (optionally restarts when you switch ships) |
 
 Other details:
+* cRPC talks to the Discord app directly over its local RPC pipe (`\\.\pipe\discord-ipc-N`), so no Discord SDK DLL is needed.
 * Presence clears as soon as the game is closed, and cRPC reconnects automatically if Discord is started or restarted after the game.
-* Discord's "Play" button launches the game (through Steam for Steam installs).
+* Up to two link buttons on your profile for other people to click (by default *Play Subspace Continuum*, linking to the Steam page).
+* Optionally show your ship or the zone instead of the game name in server member lists (`StatusDisplay`).
 * If memory reading is unavailable (or disabled), cRPC falls back to window titles and the last ship saved in the registry.
 
 ## Configuration
@@ -43,9 +45,17 @@ ShowPlayerName=0   ; your player name is hidden by default
 ShowZone=1         ; 0 shows "In a zone" instead of the zone name
 ShowPartySize=1    ; the "(x of y)" team counter
 ResetTimerOnShipChange=0
+StatusDisplay=0    ; 1 = show your ship, 2 = show the zone in member lists
+
+[Buttons]
+Button1Label=Play Subspace Continuum
+Button1Url=https://store.steampowered.com/app/352700/Subspace_Continuum/
+; e.g. your zone's website or Discord server
+Button2Label=
+Button2Url=
 ```
 
-Set `Debug=1` under `[General]` to write a `cRPC.log` with everything cRPC reads from the game. This is the first thing to check if your status looks wrong.
+Set `Debug=1` under `[General]` to write a `cRPC.log` with everything cRPC reads from the game and exchanges with Discord. This is the first thing to check if your status looks wrong. If cRPC ever crashes, it writes `cRPC-crash.log` with the location of the crash.
 
 ### Memory offsets
 The memory layout of Continuum 0.40 comes from [Marvin](https://github.com/plushmonkey/Marvin) (`platform/ContinuumGameProxy.cpp`). All offsets live in `Config.h` and can be overridden under `[Memory]` in `cRPC.ini` (e.g. `Ship=0x5C`), so a client update can be handled without recompiling.
@@ -62,14 +72,27 @@ The memory layout of Continuum 0.40 comes from [Marvin](https://github.com/plush
 | Your name | `menu040.dll`: `[menu + 0x47A38] + 0x15 + [menu + 0x47FA0] * 2860` |
 
 ## Building
-Open `DiscordBridge.sln` in Visual Studio 2019+ and build **Release | Win32** (Continuum is a 32-bit game). The output is `Continuum.exe`, with `discord_game_sdk.dll` copied next to it.
+Open `DiscordBridge.sln` in Visual Studio 2019 or newer and build **Release | x86** (Continuum is a 32-bit game). The output is a single self-contained `Release\Continuum.exe` (the C runtime is linked statically), and the default `cRPC.ini` is copied next to it. There are no third-party dependencies.
+
+Every push is built by GitHub Actions (`.github/workflows/build.yml`), which uploads a ready-to-ship `cRPC` artifact (`Continuum.exe`, `cRPC.ini`, `INSTALL.txt`, `LICENSE`).
 
 ### Tests
-* Presence logic (any platform):
+* Presence logic and the Discord protocol (any platform):
   ```bash
   g++ -std=c++17 -I. tests/presence_tests.cpp Presence.cpp -o presence_tests && ./presence_tests
+  g++ -std=c++17 -I. tests/rpc_tests.cpp DiscordRpc.cpp Presence.cpp -o rpc_tests && ./rpc_tests
   ```
-* End-to-end memory reading against a fake Continuum client (Linux with MinGW and Wine):
+* End-to-end test against a fake Continuum client and a fake Discord client (Linux with MinGW, Wine and Xvfb):
   ```bash
   tests/integration/run.sh
   ```
+
+## Project layout
+| File | Purpose |
+| --- | --- |
+| `DiscordBridge.cpp` | Entry point: launches the game and runs the update loop |
+| `Continuum.cpp` | Finds the game process, its windows and registry settings |
+| `GameMemory.cpp` | Reads the game state from the client's memory |
+| `Presence.cpp` | Turns the game state into the text and images shown on Discord |
+| `DiscordRpc.cpp` / `Activity.cpp` | Discord's local RPC protocol and the pipe connection |
+| `Config.cpp` | Loads `cRPC.ini` |

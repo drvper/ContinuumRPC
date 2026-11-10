@@ -1,0 +1,37 @@
+Continuum Rich Presence (cRPC)
+==============================
+
+Shows what you are doing in Subspace Continuum on your Discord profile.
+
+Install
+-------
+1. Close Continuum.
+2. In your Continuum folder, rename the original Continuum.exe to
+   Continuum_main.exe.
+   If you used cRPC before, Continuum_main.exe already exists: skip this
+   step and do NOT rename the cRPC Continuum.exe over it.
+3. Copy Continuum.exe and cRPC.ini from this zip into the Continuum folder.
+   (Older versions also needed discord_game_sdk.dll - it can be deleted.)
+4. Start the game the usual way. Discord must be running for the presence
+   to show (it can also be started after the game).
+
+Settings
+--------
+Everything can be switched on or off in cRPC.ini, for example your player
+name (hidden by default), the zone name, the team counter and the link
+buttons shown on your profile.
+
+Troubleshooting
+---------------
+* Set Debug=1 under [General] in cRPC.ini. cRPC then writes cRPC.log next
+  to the game with everything it reads from the game and every message it
+  exchanges with Discord.
+* If cRPC ever crashes it writes cRPC-crash.log. Please attach both files
+  when reporting a problem at https://github.com/purge-dev/ContinuumRPC/issues
+* Make sure "Share my activity" is enabled in Discord
+  (User Settings > Activity Privacy).
+
+Uninstall
+---------
+Delete Continuum.exe and cRPC.ini, then rename Continuum_main.exe back to
+Continuum.exe.

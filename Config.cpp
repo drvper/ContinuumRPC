@@ -48,11 +48,23 @@ const wchar_t* const kDefaultIni =
 	L"; 1 = restart the elapsed timer whenever you switch ships\r\n"
 	L"ResetTimerOnShipChange=0\r\n"
 	L"; 1 = show an elapsed timer while in the zone list\r\n"
-	L"ShowLauncherTimer=0\r\n";
+	L"ShowLauncherTimer=0\r\n"
+	L"; Status text shown in member lists: 0 = \"Playing Subspace Continuum\",\r\n"
+	L"; 1 = your status line (e.g. \"Playing Warbird\"), 2 = the zone name\r\n"
+	L"StatusDisplay=0\r\n"
+	L"\r\n"
+	L"[Buttons]\r\n"
+	L"; Up to two link buttons shown to other people on your profile.\r\n"
+	L"; Label: 1-32 characters, URL: must start with http:// or https://\r\n"
+	L"; Leave a label empty to remove the button.\r\n"
+	L"Button1Label=Play Subspace Continuum\r\n"
+	L"Button1Url=https://store.steampowered.com/app/352700/Subspace_Continuum/\r\n"
+	L"Button2Label=\r\n"
+	L"Button2Url=\r\n";
 
 std::wstring ReadString(const std::wstring& path, const wchar_t* section, const wchar_t* key, const std::wstring& def)
 {
-	wchar_t buf[512];
+	wchar_t buf[1024];
 	GetPrivateProfileStringW(section, key, def.c_str(), buf, _countof(buf), path.c_str());
 	return buf;
 }
@@ -152,6 +164,30 @@ void Config::Load(const std::wstring& path)
 	s.showPartySize = ReadBool(path, p, L"ShowPartySize", s.showPartySize);
 	s.resetTimerOnShipChange = ReadBool(path, p, L"ResetTimerOnShipChange", s.resetTimerOnShipChange);
 	s.showLauncherTimer = ReadBool(path, p, L"ShowLauncherTimer", s.showLauncherTimer);
+	s.statusDisplay = static_cast<int>(ReadNumber(path, p, L"StatusDisplay", static_cast<std::uint64_t>(s.statusDisplay)));
+	if (s.statusDisplay < kStatusName || s.statusDisplay > kStatusDetails)
+		s.statusDisplay = kStatusName;
+
+	s.buttons.clear();
+	const wchar_t* b = L"Buttons";
+	const PresenceButton defaults[2] = {
+		{ "Play Subspace Continuum", "https://store.steampowered.com/app/352700/Subspace_Continuum/" },
+		{ "", "" },
+	};
+	for (int i = 0; i < 2; ++i)
+	{
+		const std::wstring n = std::to_wstring(i + 1);
+		PresenceButton button;
+		button.label = WideToUtf8(ReadString(path, b, (L"Button" + n + L"Label").c_str(), Utf8ToWide(defaults[i].label)));
+		button.url = WideToUtf8(ReadString(path, b, (L"Button" + n + L"Url").c_str(), Utf8ToWide(defaults[i].url)));
+		if (button.label.empty())
+			continue;
+		if (IsValidButton(button))
+			s.buttons.push_back(button);
+		else
+			warnings.push_back("ignoring Button" + std::to_string(i + 1) +
+				" (label must be 1-32 characters, url must start with http:// or https://)");
+	}
 }
 
 } // namespace crpc
