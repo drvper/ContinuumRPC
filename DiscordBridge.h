@@ -1,77 +1,36 @@
+// DiscordBridge.h - common Windows includes and helpers for cRPC.
 #ifndef DISCORDBRIDGE_H
 #define DISCORDBRIDGE_H
-#include "discordsdk\discord.h"
-#include "resource.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN             // Exclude rarely-used stuff from Windows headers
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 
-// Windows Header Files:
+// Minimum supported OS: Windows 7 (GetTickCount64, PROCESS_QUERY_LIMITED_INFORMATION)
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+#include <sdkddkver.h>
 #include <windows.h>
-#include <SDKDDKVer.h>
 
-// C RunTime Header Files
-#include <iostream>
-#include <stdlib.h>
-#include <malloc.h>
-#include <memory.h>
-#include <tchar.h>
-#include <chrono>
-#include <thread>
+#include <cstdint>
 #include <string>
-#include <tlhelp32.h>
-/*
-#include <Shlobj.h>
-#include <shlwapi.h>
-*/
 
-BOOL CALLBACK EnumWindowsProcMy(HWND hwnd, LPARAM lParam);
-#define GAMEPROCESSOFFLINE EnumWindows(EnumWindowsProcMy, state.cont.getGameProcess())
 
-// Discord Activity Updates
-class MyActivity
-{
-public:
-	void generatePresence();
-	void setMainRPC(const char* largeImage, const char* largeImageText, discord::ActivityType type);
-	void setSubRPC(const char* stateText, const char* smallImage, const char* smallImageText, const char* details, discord::Timestamp timer);
-	/*
-	void joinParty(const char* pw);
-	void createParty();
-	void updateParty();
-	*/
-};
+namespace crpc {
 
-// Continuum handle code
-class Continuum
-{
-public:
-	void startGameClient();
-	DWORD getGameProcess();
-	bool isSteamUser();
-	bool inGame();
-	int gameWindow();
-	std::wstring getRegValue(std::wstring val);
-//	uintptr_t GetModuleBaseAddress(DWORD dwProcID);
-//	uint8_t GetShip();
-	HANDLE gHandle;
-	int ship;
-	bool inMenu = false;
-};
+// UTF-16 -> UTF-8 (Discord expects UTF-8 strings)
+std::string WideToUtf8(const std::wstring& wstr);
+// Continuum stores names in the Windows-1252 code page -> UTF-8
+std::string AnsiToUtf8(const char* str, std::size_t maxLen);
 
-struct DiscordState 
-{
-	Continuum cont;
-	MyActivity activity;
-	discord::Activity core_activity{};
-	discord::User selfusr;
-	std::unique_ptr<discord::Core> core;
-};
+// Diagnostics written to cRPC.log when Debug=1 in cRPC.ini
+void LogOpen(const std::wstring& path);
+void Log(const char* fmt, ...);
 
-extern DiscordState state;
+} // namespace crpc
 
-// Misc Helper Functions
-bool CMPSTART(const char *control, const char *constant);
-std::string multiByteString(const std::wstring& wstr);
-//bool DiscordInstalled();
-
-#endif DISCORDBRIDGE_H
+#endif // DISCORDBRIDGE_H

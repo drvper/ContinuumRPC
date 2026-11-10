@@ -1,150 +1,160 @@
-#include "DiscordBridge.h"
+// Activity.cpp - see Activity.h
+#include "Activity.h"
+#include "Config.h"
 
-double start_time = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-int mode = -1;
+namespace crpc {
 
-/* Joining/Party is too troublesome to implement and is useless now
-#define MAXPARTYSIZE 8
-void MyActivity::joinParty(const char* pw)
+namespace {
+
+constexpr ULONGLONG kMinUpdateIntervalMs = 4000;   // 5 updates per 20 s
+constexpr ULONGLONG kReconnectIntervalMs = 15000;
+constexpr std::int64_t kSteamAppId = 352700;
+
+discord::Activity ToActivity(const PresenceModel& m)
 {
-	state.core_activity.GetParty().GetSize().SetCurrentSize(state.core_activity.GetParty().GetSize().GetCurrentSize() + 1);
-
-	state.core->ActivityManager().UpdateActivity(state.core_activity, [](discord::Result result) {
-	});
-	state.core->RunCallbacks();
-}
-
-void MyActivity::updateParty() // Parties are not networked, instead we may want to use Lobbies, but its use has no more benefit due to closed source
-{
-	state.core_activity.GetParty().GetSize().SetCurrentSize(state.core_activity.GetParty().GetSize().GetCurrentSize() + 1);
-	state.core->ActivityManager().UpdateActivity(state.core_activity, [](discord::Result result) {
-	});
-	state.core->RunCallbacks();
-}
-
-void MyActivity::createParty()
-{
-	state.core_activity.GetParty().SetId("pubbing");
-	state.core_activity.GetParty().GetSize().SetMaxSize(MAXPARTYSIZE);
-	state.core_activity.GetParty().GetSize().SetCurrentSize(1);
-	state.core_activity.GetSecrets().SetJoin(createHash(6).c_str());
-	// must eventually end in updateActivity in calling function
-}
-*/
-
-void MyActivity::setMainRPC(const char* largeImage, const char* largeImageText, discord::ActivityType type)
-{
-	state.core_activity.GetAssets().SetLargeImage(largeImage);
-	state.core_activity.GetAssets().SetLargeText(largeImageText);
-	state.core_activity.SetType(type);
-}
-
-void MyActivity::setSubRPC(const char* stateText, const char* smallImage, const char* smallImageText, const char* details, discord::Timestamp timer)
-{
-	state.core_activity.SetState(stateText);
-	state.core_activity.GetAssets().SetSmallImage(smallImage);
-	state.core_activity.GetAssets().SetSmallText(smallImageText);
-	state.core_activity.SetDetails(details);
-	state.core_activity.GetTimestamps().SetStart(timer);
-}
-
-// Sets the user's presence every 6 seconds according to window mode/ship status
-void MyActivity::generatePresence()
-{
-	double now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-	setMainRPC("large-ss", "Subspace Continuum", discord::ActivityType::Playing); // set the common rich presence assets
-	/*
-	if (strcmp(state.core_activity.GetParty().GetId(), "") == 0) // is this user in a party?
-		createParty(); // create party for others to join with a unique pw
-	else
-		state.core_activity.GetParty().GetSize().SetCurrentSize(state.core_activity.GetParty().GetSize().GetCurrentSize()); // update party's size 
-		*/
-	if (state.cont.inGame()) // active game window
+	discord::Activity a{};
+	a.SetType(discord::ActivityType::Playing);
+	a.SetDetails(m.details.c_str());
+	a.SetState(m.state.c_str());
+	a.GetAssets().SetLargeImage(m.largeImage.c_str());
+	a.GetAssets().SetLargeText(m.largeText.c_str());
+	a.GetAssets().SetSmallImage(m.smallImage.c_str());
+	a.GetAssets().SetSmallText(m.smallText.c_str());
+	a.GetTimestamps().SetStart(m.startTimestamp);
+	if (!m.partyId.empty() && m.partySize > 0 && m.partyMax >= m.partySize)
 	{
-		if (mode != 0)
-		{
-			start_time = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-			mode = 0;
-		}
-
-		if (state.cont.ship == 8)
-			setSubRPC("Spectating", "idle", "Spectator Mode", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-		else
-		{
-			if (state.cont.ship == 0)
-				setSubRPC("Playing", "playing", "Playing as Warbird", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-			else if (state.cont.ship == 1)
-				setSubRPC("Playing", "jav", "Playing as Javelin", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-			else if (state.cont.ship == 2)
-				setSubRPC("Playing", "spid", "Playing as Spider", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-			else if (state.cont.ship == 3)
-				setSubRPC("Playing", "lev", "Playing as Leviathan", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-			else if (state.cont.ship == 4)
-				setSubRPC("Playing", "terr", "Playing as Terrier", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-			else if (state.cont.ship == 5)
-				setSubRPC("Playing", "weas", "Playing as Weasel", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-			else if (state.cont.ship == 6)
-				setSubRPC("Playing", "lanc", "Playing as Lancaster", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-			else if (state.cont.ship == 7)
-				setSubRPC("Playing", "sha", "Playing as Shark", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-		}
-		state.cont.inMenu = false;
+		a.GetParty().SetId(m.partyId.c_str());
+		a.GetParty().GetSize().SetCurrentSize(m.partySize);
+		a.GetParty().GetSize().SetMaxSize(m.partyMax);
 	}
+	a.SetInstance(m.instance);
+	return a;
+}
+
+} // namespace
+
+DiscordClient::DiscordClient(std::int64_t clientId, bool steam) : clientId_(clientId), steam_(steam)
+{
+	Connect();
+}
+
+DiscordClient::~DiscordClient()
+{
+	core_.reset();
+}
+
+bool DiscordClient::Connect()
+{
+	nextConnect_ = GetTickCount64() + kReconnectIntervalMs;
+
+	discord::Core* core = nullptr;
+	discord::Result result = discord::Core::Create(clientId_, DiscordCreateFlags_NoRequireDiscord, &core);
+	if (result != discord::Result::Ok || !core)
+	{
+		// Discord is probably not running; try again later
+		Log("discord: connect failed (%d)", static_cast<int>(result));
+		return false;
+	}
+	core_.reset(core);
+
+	core_->SetLogHook(discord::LogLevel::Warn, [](discord::LogLevel level, const char* message) {
+		Log("discord sdk [%d]: %s", static_cast<int>(level), message);
+	});
+
+	// Lets Discord launch the game (e.g. from the game library)
+	if (steam_)
+		core_->ActivityManager().RegisterSteam(kSteamAppId);
 	else
 	{
-		if (state.cont.gameWindow() == 1) // chat menu
-		{
-			if (mode != 1)
-			{
-				start_time = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-				mode = 1;
-			}
-			setSubRPC("Chatting", "chat", "Chatting in Game", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-		}
-		else if (state.cont.gameWindow() == 2) // launcher
-		{
-			if (mode != 2)
-			{
-				start_time = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-				mode = 2;
-			}
-			std::string skin = "Skin: " + multiByteString(state.cont.getRegValue(L"Skin"));
-			if (skin.length() > 6) // make sure it returned a proper skin value from registry
-				setSubRPC(skin.c_str(), "launcher", "Game Launcher", "Selecting Zone", 0);
-			else
-				setSubRPC("", "launcher", "Game Launcher", "Selecting Zone", 0);
-		}
-		else if (state.cont.gameWindow() == 3) // doing other things/idle
-		{
-			if (mode != 1) // let's consider idle + chatting to be the same mode to avoid unnecessary timers
-			{
-				start_time = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-				mode = 1;
-			}
-			setSubRPC("Idle", "idle2", "Waiting for Game", multiByteString(state.cont.getRegValue(L"Zone")).c_str(), now - (now - start_time));
-		}
-		else if (state.cont.gameWindow() == 4) // idle, launcher open and out of focus
-		{
-			if (mode != 1) 
-			{
-				start_time = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-				mode = 1;
-			}
-			setSubRPC("Idle", "idle2", "Idle", "Selecting Zone", now - (now - start_time));
-		}
+		wchar_t path[MAX_PATH];
+		DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+		std::string command = "\"" + WideToUtf8(std::wstring(path, len)) + "\"";
+		core_->ActivityManager().RegisterCommand(command.c_str());
 	}
 
-	state.core->ActivityManager().UpdateActivity(state.core_activity, [](discord::Result result) {
-	});
-	state.core->RunCallbacks();
+	Log("discord: connected");
+	haveSent_ = false; // the new connection has no activity yet
+	inFlight_ = false;
+	return true;
+}
 
-	std::thread([=]() {
-		std::this_thread::sleep_for(std::chrono::seconds(5)); // updateActivity ratelimited at 1 update/5 sec; SDK docs say requests get queued and
-		if (GAMEPROCESSOFFLINE == 0)                          // do not require developer-side intervention, but apparently it isn't so (?bug)
-			generatePresence();
+void DiscordClient::Disconnect(const char* reason)
+{
+	Log("discord: disconnected (%s)", reason);
+	core_.reset();
+	haveSent_ = false;
+	inFlight_ = false;
+	nextConnect_ = GetTickCount64() + kReconnectIntervalMs;
+}
+
+void DiscordClient::SetPresence(const PresenceModel& model)
+{
+	desired_ = model;
+	haveDesired_ = true;
+}
+
+void DiscordClient::Flush()
+{
+	if (!core_ || !haveDesired_ || inFlight_)
+		return;
+	if (haveSent_ && desired_ == sent_)
+		return;
+
+	ULONGLONG now = GetTickCount64();
+	if (lastSend_ && now - lastSend_ < kMinUpdateIntervalMs)
+		return; // keep the latest model queued until the rate limit allows it
+
+	lastSend_ = now;
+	inFlight_ = true;
+	PresenceModel sending = desired_;
+	core_->ActivityManager().UpdateActivity(ToActivity(sending), [this, sending](discord::Result result) {
+		inFlight_ = false;
+		if (result == discord::Result::Ok)
+		{
+			sent_ = sending;
+			haveSent_ = true;
+		}
 		else
 		{
-			state.core->~Core();
-			exit(0);
-		}}).detach();
+			Log("discord: UpdateActivity failed (%d)", static_cast<int>(result));
+			haveSent_ = false; // retried after the rate limit interval
+		}
+	});
 }
+
+void DiscordClient::Tick()
+{
+	if (!core_)
+	{
+		if (GetTickCount64() >= nextConnect_)
+			Connect();
+		if (!core_)
+			return;
+	}
+
+	discord::Result result = core_->RunCallbacks();
+	if (result != discord::Result::Ok)
+	{
+		Disconnect(result == discord::Result::NotRunning ? "Discord closed" : "callback error");
+		return;
+	}
+	Flush();
+}
+
+void DiscordClient::Shutdown()
+{
+	if (!core_)
+		return;
+
+	bool done = false;
+	core_->ActivityManager().ClearActivity([&done](discord::Result) { done = true; });
+	for (int i = 0; i < 20 && !done; ++i)
+	{
+		if (core_->RunCallbacks() != discord::Result::Ok)
+			break;
+		Sleep(25);
+	}
+	core_.reset();
+}
+
+} // namespace crpc

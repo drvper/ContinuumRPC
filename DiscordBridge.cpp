@@ -1,392 +1,212 @@
+// DiscordBridge.cpp - cRPC entry point.
+//
+// cRPC replaces Continuum.exe: it starts the real client (Continuum_main.exe),
+// then samples the game state from the client's memory once per poll interval
+// and mirrors it to Discord rich presence. Everything runs on one thread.
 #include "DiscordBridge.h"
+#include "Activity.h"
+#include "Config.h"
+#include "Continuum.h"
+#include "GameMemory.h"
+#include "Presence.h"
 
-discord::Core* core{};
-DiscordState state{};
+#include <cstdarg>
+#include <cstdio>
+#include <ctime>
 
-// Global Variables:
-#define MAX_LOADSTRING 100
-HINSTANCE hInst;                                // current instance
-WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
-WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
+namespace crpc {
 
-// Forward declarations of functions included in this code module:
-ATOM                MyRegisterClass(HINSTANCE hInstance);
-BOOL                InitInstance(HINSTANCE, int);
-LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
-INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
+namespace {
+FILE* g_log = nullptr;
+}
 
-// Continuum related Handle Functions
-HWND g_HWND = NULL;
-HHOOK hHook;
-
-BOOL CALLBACK EnumWindowsProcMy(HWND hwnd, LPARAM lParam)
+std::string WideToUtf8(const std::wstring& wstr)
 {
-	DWORD lpdwProcessId;
-	GetWindowThreadProcessId(hwnd, &lpdwProcessId);
-	if (lpdwProcessId == lParam)
+	if (wstr.empty())
+		return std::string();
+	int size = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()), nullptr, 0, nullptr, nullptr);
+	std::string out(size, '\0');
+	WideCharToMultiByte(CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()), &out[0], size, nullptr, nullptr);
+	return out;
+}
+
+std::string AnsiToUtf8(const char* str, std::size_t maxLen)
+{
+	std::size_t len = strnlen(str, maxLen);
+	if (!len)
+		return std::string();
+	int wlen = MultiByteToWideChar(1252, 0, str, static_cast<int>(len), nullptr, 0);
+	std::wstring w(wlen, L'\0');
+	MultiByteToWideChar(1252, 0, str, static_cast<int>(len), &w[0], wlen);
+	return WideToUtf8(w);
+}
+
+void LogOpen(const std::wstring& path)
+{
+	if (!g_log)
+		g_log = _wfopen(path.c_str(), L"w");
+}
+
+void Log(const char* fmt, ...)
+{
+	if (!g_log)
+		return;
+	SYSTEMTIME t;
+	GetLocalTime(&t);
+	fprintf(g_log, "[%02d:%02d:%02d.%03d] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(g_log, fmt, args);
+	va_end(args);
+	fputc('\n', g_log);
+	fflush(g_log);
+}
+
+namespace {
+
+constexpr DWORD kTickMs = 50;               // Discord callback pump interval
+constexpr ULONGLONG kLostGraceMs = 5000;    // Continuum restarts itself on launch
+
+std::string Describe(const GameSnapshot& s, const GameMemory::Result& r)
+{
+	static const char* const kScreens[] = { "launcher", "zone", "chat" };
+	char buf[512];
+	snprintf(buf, sizeof(buf),
+		"screen=%s focused=%d mem(readable=%d loaded=%d self=%d) zone='%s' map='%s' name='%s' "
+		"ship=%d freq=%d bounty=%d flags=%d safe=%d players=%d playing=%d team=%d",
+		kScreens[static_cast<int>(s.screen)], s.focused, r.readable, r.gameLoaded, r.selfFound,
+		s.zone.c_str(), s.mapFile.c_str(), s.playerName.c_str(), s.ship, s.freq, s.bounty, s.flags,
+		s.inSafeZone, s.arenaPlayers, s.arenaPlaying, s.teamPlayers);
+	return buf;
+}
+
+GameSnapshot TakeSnapshot(const Config& cfg, GameClient& game, GameMemory& memory, GameMemory::Result& mem)
+{
+	GameSnapshot snap;
+	snap.zone = WideToUtf8(GameClient::RegistryString(L"Zone"));
+	snap.skin = WideToUtf8(GameClient::RegistryString(L"Skin"));
+
+	mem = GameMemory::Result();
+	if (cfg.memoryReading && memory.Attached())
+		mem = memory.Read(snap);
+
+	const WindowState ws = game.Windows();
+	const bool memoryUsable = mem.readable;
+
+	if (ws.foreground == WindowKind::Chat)
 	{
-		g_HWND = hwnd;
-		return FALSE;
+		snap.screen = Screen::Chat;
+		snap.focused = true;
 	}
-	return TRUE;
-}
-
-// Misc Helper Functions
-bool CMPSTART(const char *control, const char *constant) // ripped from MERV
-{
-	char c;
-
-	while (c = *control)
+	else if (memoryUsable ? mem.gameLoaded : (ws.foreground == WindowKind::Game || ws.hasGame))
 	{
-		if (*constant != c)
-			return false;
-
-		++control;
-		++constant;
+		snap.screen = Screen::InZone;
+		snap.focused = ws.foreground == WindowKind::Game;
+	}
+	else
+	{
+		snap.screen = Screen::Launcher;
+		snap.focused = ws.foreground != WindowKind::None;
 	}
 
-	return true;
+	// Without memory the best we know is the last ship saved in the registry
+	if (snap.screen != Screen::Launcher && !snap.memoryValid)
+	{
+		DWORD ship = 0;
+		if (GameClient::RegistryDword(L"Ship", ship) && ship <= kSpectator)
+			snap.ship = static_cast<int>(ship);
+	}
+	return snap;
 }
 
-std::string multiByteString(const std::wstring& wstr) // unicode to multibyte string
+} // namespace
+} // namespace crpc
+
+int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
 {
-    if (wstr.empty()) return std::string();
-    int size = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
-    std::string resStr(size, 0);
-    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &resStr[0], size, NULL, NULL);
-    return resStr;
-}
+	UNREFERENCED_PARAMETER(hInstance);
+	UNREFERENCED_PARAMETER(hPrevInstance);
+	UNREFERENCED_PARAMETER(lpCmdLine);
+	UNREFERENCED_PARAMETER(nCmdShow);
+	using namespace crpc;
 
-// Keyboard hook to detect ship changes (unreliable since rate limits must be obeyed)
-LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
-{
-    KBDLLHOOKSTRUCT* pKbdLLHookStruct = (KBDLLHOOKSTRUCT*)lParam;
-    if (state.cont.inGame())
-    {
-        if (wParam == WM_KEYDOWN)
-        {
-            switch (pKbdLLHookStruct->vkCode)
-            {
-            case VK_ESCAPE : 
-            {
-                if (state.cont.inMenu) // if they are closing the menu without selecting a ship, reset
-                    state.cont.inMenu = false;
-                else
-                    state.cont.inMenu = true;
-                break;
-            }
-			case 0x31:
-			{
-				if (state.cont.inMenu)
-				{
-					state.cont.ship = 0;
-				}
-                break;
-			}
-            case 0x32:
-            {
-                if (state.cont.inMenu)
-                {
-                    state.cont.ship = 1;
-                }
-                break;
-            }
-            case 0x33:
-            {
-                if (state.cont.inMenu)
-                {
-                    state.cont.ship = 2;
-                }
-                break;
-            }
-            case 0x34:
-            {
-                if (state.cont.inMenu)
-                {
-                    state.cont.ship = 3;
-                }
-                break;
-            }
-            case 0x35:
-            {
-                if (state.cont.inMenu)
-                {
-                    state.cont.ship = 4;
-                }
-                break;
-            }
-            case 0x36:
-            {
-                if (state.cont.inMenu)
-                {
-                    state.cont.ship = 5;
-                }
-                break;
-            }
-            case 0x37:
-            {
-                if (state.cont.inMenu)
-                {
-                    state.cont.ship = 6;
-                }
-                break;
-            }
-            case 0x38:
-            {
-                if (state.cont.inMenu)
-                {
-                    state.cont.ship = 7;
-                }
-                break;
-            }
-            case 0x53:
-            {
-                if (state.cont.inMenu)
-                {
-                    state.cont.ship = 8;
-                }
-                break;
-            }
-			} 
-        }
-    }
-    return CallNextHookEx(hHook, nCode, wParam, lParam);
-}
+	const std::wstring dir = ExeDirectory();
+	const std::wstring ini = dir + L"cRPC.ini";
+	Config::WriteDefault(ini);
+	Config cfg;
+	cfg.Load(ini);
+	if (cfg.debugLog)
+		LogOpen(dir + L"cRPC.log");
 
-// Discord Core Initializer 
-void DiscordInit()
-{
-	char install_dir[MAX_PATH];
-	GetCurrentDirectoryA(MAX_PATH, install_dir);
-	sprintf_s(install_dir, "%s\\%s", install_dir, "Continuum.exe"); 
+	GameClient game(cfg);
 
-    if (discord::Core::Create(611578814073405465, DiscordCreateFlags_NoRequireDiscord, &core) == discord::Result::Ok)
-        state.core.reset(core);
+	// Only one presence instance; a second launch just starts another client
+	HANDLE instance = CreateMutexW(nullptr, TRUE, L"Local\\ContinuumRPC");
+	const bool primary = !instance || GetLastError() != ERROR_ALREADY_EXISTS;
 
-	if (!state.core) // Discord failed to instantiate
-        state.core->~Core();
+	if (cfg.launchGame)
+		game.Launch();
+	if (!primary)
+		return 0;
 
-    // Discord's game launching command 
-    if (state.cont.isSteamUser())
-        state.core->ActivityManager().RegisterSteam(352700);        // this will make it appear in Library as Steam game and launch via Steam
-    else
-        state.core->ActivityManager().RegisterCommand(install_dir); // mainly useful for Join/Spectate activities that are unused here
+	DiscordClient discord(cfg.clientId, GameClient::IsSteam());
+	GameMemory memory(cfg.offsets);
+	PresenceBuilder builder;
 
-	// Logger - uncomment when testing
-	/*
-	state.core->SetLogHook(discord::LogLevel::Error, [](discord::LogLevel level, const char* message){
-		MessageBoxA(NULL, message, "Error", MB_ICONERROR);
-	});
-	*/
+	const ULONGLONG started = GetTickCount64();
+	ULONGLONG lastSeen = 0;
+	ULONGLONG nextPoll = 0;
+	std::string lastDescription;
 
-	// Relevant Events -> these are received by running RunCallbacks() very often
-        /* OnCurrentUserUpdate
-    *  Fires when the User struct of the currently connected user changes. They may have changed their avatar, username, or something else. */
-    state.core->UserManager().OnCurrentUserUpdate.Connect([]() {
-        state.core->UserManager().GetCurrentUser(&state.selfusr);
-        });
+	for (;;)
+	{
+		const ULONGLONG now = GetTickCount64();
 
-	/* OnActivityJoin 
-	*  Fires when a user accepts a game chat invite or receives confirmation from Asking to Join. */
-/*	state.core->ActivityManager().OnActivityJoin.Connect([](const char* secret) { 
-		state.activity.joinParty(secret);
-	});
-	/* OnActivityJoinRequest
-	*  Fires when a user asks to join the current user's game. */
-/*	state.core->ActivityManager().OnActivityJoinRequest.Connect([](discord::User const& user) {
-		state.requester = user;
-		state.activity.updateParty();
-	});
-	/* OnActivityInvite
-	*  Fires when the user receives a join or spectate invite.*/
-/*	state.core->ActivityManager().OnActivityInvite.Connect([](discord::ActivityActionType, discord::User const& user, discord::Activity const&) {
-		state.inviter = user;
-	});
-
-	/* OnToggle
-	*  Fires when the overlay is locked or unlocked (a.k.a.opened or closed) 
-	state.core->OverlayManager().OnToggle.Connect([](bool locked) {       // (needs a handle to THIS process for hook -> ?injection necessary) 
-		state.overlayLocked = locked;
-	});
-	*/
-}
-
-int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
-                     _In_opt_ HINSTANCE hPrevInstance,
-                     _In_ LPWSTR    lpCmdLine,
-                     _In_ int       nCmdShow)
-{
-    UNREFERENCED_PARAMETER(hPrevInstance);
-    UNREFERENCED_PARAMETER(lpCmdLine);
-
-	// Start Continuum_main.exe
-	state.cont.startGameClient();
-
-    // Entry point for SDK-Client interface
-	DiscordInit();
-
-	// Begin RPC
-	std::thread([=]() {
-		std::this_thread::sleep_for(std::chrono::seconds(6)); // wait for SS to load
-        if (GAMEPROCESSOFFLINE == 0) // game process is available
-        {
-            state.activity.generatePresence();
-            state.cont.ship = atoi(multiByteString(state.cont.getRegValue(L"Ship")).c_str()); // sets ship status as last played ship
-        }
-		else                      // exit out if it hasn't started -> ?remove because of slow PCs
+		if (now >= nextPoll)
 		{
-			state.core->~Core();
-			exit(0);
-		}}).detach();
+			nextPoll = now + cfg.pollIntervalMs;
 
-    // Initialize global strings
-    LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
-    LoadStringW(hInstance, IDC_DISCORDBRIDGE, szWindowClass, MAX_LOADSTRING);
-    MyRegisterClass(hInstance);
+			if (game.Track())
+			{
+				lastSeen = now;
+				if (cfg.memoryReading && memory.Pid() != game.Pid())
+					memory.Attach(game.Pid());
 
-    // Perform application initialization:
-    if (!InitInstance (hInstance, nCmdShow))
-    {
-        return FALSE;
-    }
+				GameMemory::Result mem;
+				GameSnapshot snap = TakeSnapshot(cfg, game, memory, mem);
+				discord.SetPresence(builder.Build(snap, cfg.presence, static_cast<std::int64_t>(std::time(nullptr))));
 
-    HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_DISCORDBRIDGE));
-    hHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
+				if (cfg.debugLog)
+				{
+					std::string d = Describe(snap, mem);
+					if (d != lastDescription)
+						Log("state: %s", d.c_str());
+					lastDescription.swap(d);
+				}
+			}
+			else
+			{
+				memory.Detach();
+				if (lastSeen ? now - lastSeen > kLostGraceMs : now - started > cfg.startupTimeoutSec * 1000ULL)
+					break; // the game was closed (or never started)
+			}
+		}
 
-    MSG msg;
+		discord.Tick();
 
-    // Main message loop:
-    while (GetMessage(&msg, nullptr, 0, 0))
-    {   
-        if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
-        {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-			state.core->RunCallbacks();
-        }
-    }
+		// Sleep until the next tick, waking immediately if the game exits
+		if (game.Process())
+		{
+			if (WaitForSingleObject(game.Process(), kTickMs) == WAIT_OBJECT_0)
+				nextPoll = 0; // re-track right away instead of spinning on a signaled handle
+		}
+		else
+			Sleep(kTickMs);
+	}
 
-    return (int) msg.wParam;
-}
-
-//
-//  FUNCTION: MyRegisterClass()
-//
-//  PURPOSE: Registers the window class.
-//
-ATOM MyRegisterClass(HINSTANCE hInstance)
-{
-    WNDCLASSEXW wcex;
-
-    wcex.cbSize = sizeof(WNDCLASSEX);
-
-    wcex.style          = CS_HREDRAW | CS_VREDRAW;
-    wcex.lpfnWndProc    = WndProc;
-    wcex.cbClsExtra     = 0;
-    wcex.cbWndExtra     = 0;
-    wcex.hInstance      = hInstance;
-    wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_DISCORDBRIDGE));
-    wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
-    wcex.hbrBackground  = (HBRUSH)(COLOR_WINDOW+1);
-    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_DISCORDBRIDGE);
-    wcex.lpszClassName  = szWindowClass;
-    wcex.hIconSm        = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
-
-    return RegisterClassExW(&wcex);
-}
-
-//
-//   FUNCTION: InitInstance(HINSTANCE, int)
-//
-//   PURPOSE: Saves instance handle and creates main window
-//
-//   COMMENTS:
-//
-//        In this function, we save the instance handle in a global variable and
-//        create and display the main program window.
-//
-BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
-{
-   hInst = hInstance; // Store instance handle in our global variable
-
-   HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-      CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
-
-   if (!hWnd)
-   {
-      return FALSE;
-   }
-
- //  ShowWindow(hWnd, nCmdShow);
-   UpdateWindow(hWnd);
-
-   return TRUE;
-}
-
-//
-//  FUNCTION: WndProc(HWND, UINT, WPARAM, LPARAM)
-//
-//  PURPOSE:  Processes messages for the main window.
-//
-//  WM_COMMAND  - process the application menu
-//  WM_PAINT    - Paint the main window
-//  WM_DESTROY  - post a quit message and return
-//
-//
-LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    switch (message)
-    {
-    case WM_COMMAND:
-        {
-            int wmId = LOWORD(wParam);
-            // Parse the menu selections:
-            switch (wmId)
-            {
-            case IDM_ABOUT:
-                DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
-                break;
-            case IDM_EXIT:
-                DestroyWindow(hWnd);
-                break;
-            default:
-                return DefWindowProc(hWnd, message, wParam, lParam);
-            }
-        }
-        break;
-    case WM_PAINT:
-        {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hWnd, &ps);
-            // TODO: Add any drawing code that uses hdc here...
-            EndPaint(hWnd, &ps);
-        }
-        break;
-    case WM_DESTROY:
-        PostQuitMessage(0); 
-        break;
-    default:
-        return DefWindowProc(hWnd, message, wParam, lParam);
-    }
-    return 0;
-}
-
-// Message handler for about box.
-INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    UNREFERENCED_PARAMETER(lParam);
-    switch (message)
-    {
-    case WM_INITDIALOG:
-        return (INT_PTR)TRUE;
-
-    case WM_COMMAND:
-        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
-        {
-            EndDialog(hDlg, LOWORD(wParam));
-            return (INT_PTR)TRUE;
-        }
-        break;
-    }
-    return (INT_PTR)FALSE;
+	Log("exiting");
+	discord.Shutdown();
+	if (instance)
+		CloseHandle(instance);
+	return 0;
 }

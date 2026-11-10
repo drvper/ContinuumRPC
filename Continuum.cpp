@@ -1,161 +1,224 @@
-#include "DiscordBridge.h"
+// Continuum.cpp - see Continuum.h
+#include "Continuum.h"
 
-std::string ReadString(HANDLE handle, size_t address, size_t len)
+#include <tlhelp32.h>
+
+#include <cwchar>
+
+namespace crpc {
+
+namespace {
+
+const wchar_t* const kRegistryKey = L"SOFTWARE\\Continuum\\State";
+
+bool StartsWith(const wchar_t* s, const wchar_t* prefix)
 {
-	std::string value;
-	SIZE_T read;
-
-	value.resize(len);
-
-	if (ReadProcessMemory(handle, (LPVOID)address, &value[0], len, &read)) {
-		return value;
-	}
-
-	return "";
+	return wcsncmp(s, prefix, wcslen(prefix)) == 0;
 }
 
-void Continuum::startGameClient()
+// Skips argv[0] of a Windows command line.
+const wchar_t* ArgumentsOf(const wchar_t* cmd)
 {
-	STARTUPINFO si;
-	PROCESS_INFORMATION processInfo;
-	ZeroMemory(&si, sizeof(si));
+	if (*cmd == L'"')
+	{
+		++cmd;
+		while (*cmd && *cmd != L'"')
+			++cmd;
+		if (*cmd)
+			++cmd;
+	}
+	else
+	{
+		while (*cmd && *cmd != L' ' && *cmd != L'\t')
+			++cmd;
+	}
+	while (*cmd == L' ' || *cmd == L'\t')
+		++cmd;
+	return cmd;
+}
+
+struct EnumContext {
+	DWORD pid;
+	WindowState* state;
+};
+
+BOOL CALLBACK EnumGameWindows(HWND hwnd, LPARAM lParam)
+{
+	auto* ctx = reinterpret_cast<EnumContext*>(lParam);
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
+	if (pid != ctx->pid || !IsWindowVisible(hwnd))
+		return TRUE;
+
+	wchar_t title[128];
+	if (!GetWindowTextW(hwnd, title, _countof(title)))
+		return TRUE;
+
+	switch (ClassifyWindowTitle(title))
+	{
+	case WindowKind::Game: ctx->state->hasGame = true; break;
+	case WindowKind::Chat: ctx->state->hasChat = true; break;
+	case WindowKind::Launcher: ctx->state->hasLauncher = true; break;
+	default: break;
+	}
+	return TRUE;
+}
+
+} // namespace
+
+// Window titles used by the client:
+//   "Continuum" / "Subspace Continuum"                  - the game itself
+//   "Continuum 0.40 - <zone>" / "Subspace Continuum ..." - windowed chat mode
+//   "Continuum 0.40" / "Subspace Continuum 0.40"         - launcher (zone list)
+WindowKind ClassifyWindowTitle(const wchar_t* title)
+{
+	const wchar_t* rest = nullptr;
+	if (StartsWith(title, L"Subspace Continuum"))
+		rest = title + wcslen(L"Subspace Continuum");
+	else if (StartsWith(title, L"Continuum"))
+		rest = title + wcslen(L"Continuum");
+	else
+		return WindowKind::None;
+
+	if (*rest == L'\0')
+		return WindowKind::Game;
+	if (*rest != L' ')
+		return WindowKind::None;
+	if (wcsstr(rest, L" - "))
+		return WindowKind::Chat;
+	return WindowKind::Launcher;
+}
+
+bool GameClient::Launch()
+{
+	std::wstring exe = ExeDirectory() + cfg_.gameExecutable;
+	std::wstring cmd = L"\"" + exe + L"\"";
+	const wchar_t* args = ArgumentsOf(GetCommandLineW());
+	if (*args)
+		cmd += std::wstring(L" ") + args;
+
+	STARTUPINFOW si{};
 	si.cb = sizeof(si);
-	ZeroMemory(&processInfo, sizeof(processInfo));
+	PROCESS_INFORMATION pi{};
+	std::wstring dir = ExeDirectory();
 
-	if (CreateProcess(L"Continuum_main.exe", L"cmd", NULL, NULL, TRUE, 0, NULL, NULL, &si, &processInfo))
+	// CreateProcessW may modify the command line buffer, so it must be writable
+	if (!CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, 0, nullptr,
+		dir.empty() ? nullptr : dir.c_str(), &si, &pi))
 	{
-		WaitForSingleObject(processInfo.hProcess, INFINITE);
-		gHandle = processInfo.hProcess;
-
-		CloseHandle(processInfo.hProcess);
-		CloseHandle(processInfo.hThread);
-	}
-	return;
-}
-
-DWORD Continuum::getGameProcess()
-{
-	PROCESSENTRY32 entry;
-	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	entry.dwSize = sizeof(PROCESSENTRY32);
-
-	if (Process32First(snapshot, &entry))
-	{
-		do
-		{
-			if (!lstrcmpi(entry.szExeFile, L"Continuum_main.exe"))
-			{
-				CloseHandle(snapshot);
-				return entry.th32ProcessID;
-			}
-		} while (Process32Next(snapshot, &entry));
-	}
-
-	CloseHandle(snapshot);
-}
-
-bool Continuum::isSteamUser()
-{
-	char path[MAX_PATH];
-	GetCurrentDirectoryA(MAX_PATH, path);
-
-	std::string fullpath = path;
-	if (fullpath.find("Steam") != fullpath.npos) // simple but works
-		return true;
-	else
+		Log("launch: CreateProcess(%s) failed, error %lu", WideToUtf8(exe).c_str(), GetLastError());
 		return false;
+	}
+
+	Log("launch: started %s (pid %lu)", WideToUtf8(exe).c_str(), pi.dwProcessId);
+	CloseHandle(pi.hThread);
+	CloseHandle(pi.hProcess);
+	return true;
 }
 
-bool Continuum::inGame()
+DWORD GameClient::FindProcess() const
 {
-	HWND hwnd;
+	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap == INVALID_HANDLE_VALUE)
+		return 0;
 
-	if (state.cont.isSteamUser())
-		hwnd = FindWindow(0, _T("Subspace Continuum")); // steam users
-	else
-		if (FindWindow(0, _T("Continuum")) == NULL)
-			hwnd = FindWindow(0, _T("Subspace Continuum")); // discord installs
+	const DWORD self = GetCurrentProcessId();
+	DWORD fallback = 0;
+	DWORD best = 0;
+
+	PROCESSENTRY32W entry;
+	entry.dwSize = sizeof(entry);
+	for (BOOL ok = Process32FirstW(snap, &entry); ok; ok = Process32NextW(snap, &entry))
+	{
+		if (entry.th32ProcessID == self || _wcsicmp(entry.szExeFile, cfg_.gameExecutable.c_str()) != 0)
+			continue;
+		// The copy we launched restarts itself; prefer the restarted child
+		if (entry.th32ParentProcessID == self)
+			fallback = entry.th32ProcessID;
 		else
-			hwnd = FindWindow(0, _T("Continuum")); // legacy
-	if (GetForegroundWindow() == hwnd) // active game window
-		return true;
-	else
+			best = entry.th32ProcessID;
+	}
+	CloseHandle(snap);
+	return best ? best : fallback;
+}
+
+void GameClient::Release()
+{
+	if (process_)
+		CloseHandle(process_);
+	process_ = nullptr;
+	pid_ = 0;
+}
+
+bool GameClient::Track()
+{
+	if (process_ && WaitForSingleObject(process_, 0) == WAIT_TIMEOUT)
+		return true; // still running
+
+	if (process_)
+		Log("game: process %lu exited", pid_);
+	Release();
+
+	DWORD pid = FindProcess();
+	if (!pid)
 		return false;
+
+	process_ = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+	if (!process_)
+		return false;
+	pid_ = pid;
+	Log("game: tracking pid %lu", pid_);
+	return true;
 }
 
-int Continuum::gameWindow()
+WindowState GameClient::Windows() const
 {
-	char text[32];
-	HWND alt = GetForegroundWindow();
-	GetWindowTextA(alt, text, 32);
+	WindowState ws;
+	if (!pid_)
+		return ws;
 
-	if ((CMPSTART("Subspace Continuum 0.40 -", text) || (CMPSTART("Continuum 0.40 -", text)))) // chat menu
-		return 1;
-	else if ((CMPSTART("Subspace Continuum 0.40", text) || (CMPSTART("Continuum 0.40", text)))) // launcher
-		return 2;
-	else
-		if ((FindWindow(0, _T("Continuum")) == NULL) && (FindWindow(0, _T("Subspace Continuum")) == NULL)) // not idling in game but launcher open
-			return 4;
-		else // true idle
-			return 3;
+	EnumContext ctx{ pid_, &ws };
+	EnumWindows(EnumGameWindows, reinterpret_cast<LPARAM>(&ctx));
+
+	HWND fg = GetForegroundWindow();
+	DWORD fgPid = 0;
+	if (fg)
+		GetWindowThreadProcessId(fg, &fgPid);
+	if (fgPid == pid_)
+	{
+		wchar_t title[128];
+		if (GetWindowTextW(fg, title, _countof(title)))
+			ws.foreground = ClassifyWindowTitle(title);
+		if (ws.foreground == WindowKind::None)
+			ws.foreground = WindowKind::Launcher; // dialogs owned by the client (e.g. profile editor)
+	}
+	return ws;
 }
 
-std::wstring Continuum::getRegValue(std::wstring val)
+bool GameClient::IsSteam()
 {
-	HKEY hKey;
-	if (RegOpenKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Continuum\\State", 0, KEY_READ, &hKey) != ERROR_SUCCESS)
-		throw "Registry entry not found!";
-
-	DWORD type, cbData, buff;
-
-	if (RegQueryValueEx(hKey, val.c_str(), NULL, &type, NULL, &cbData) != ERROR_SUCCESS)
-		RegCloseKey(hKey);
-
-	std::wstring value(cbData / sizeof(wchar_t), L'\0');
-	if (type == REG_DWORD) // ie. ship number
-	{
-		if (RegQueryValueEx(hKey, val.c_str(), NULL, &type, (LPBYTE)&buff, &cbData) != ERROR_SUCCESS)
-			RegCloseKey(hKey);
-
-		return std::to_wstring(buff);
-	}
-	else if (type == REG_SZ) // ie. zone name/skin
-	{
-		if (RegQueryValueEx(hKey, val.c_str(), NULL, NULL, reinterpret_cast<LPBYTE>(&value[0]), &cbData) != ERROR_SUCCESS)
-			RegCloseKey(hKey);
-
-		size_t firstNull = value.find_first_of(L'\0');
-		if (firstNull != std::string::npos)
-			value.resize(firstNull);
-
-		return value;
-	}
-	RegCloseKey(hKey);
+	// Steam sets SteamAppId for the games it launches
+	if (GetEnvironmentVariableW(L"SteamAppId", nullptr, 0) > 0)
+		return true;
+	std::wstring dir = ExeDirectory();
+	for (auto& c : dir)
+		c = static_cast<wchar_t>(towlower(c));
+	return dir.find(L"steamapps") != std::wstring::npos || dir.find(L"steam") != std::wstring::npos;
 }
-/*
-// TODO: Get player's ship by reading from memory. Unable to get base address for some reason now.
-uintptr_t Continuum::GetModuleBaseAddress(DWORD dwProcID)
+
+std::wstring GameClient::RegistryString(const wchar_t* name)
 {
-	uintptr_t ModuleBaseAddress = 0;
-	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, dwProcID);
-	if (hSnapshot != INVALID_HANDLE_VALUE)
-	{
-		MODULEENTRY32 ModuleEntry32;
-		ModuleEntry32.dwSize = sizeof(MODULEENTRY32);
-		if (Module32First(hSnapshot, &ModuleEntry32))
-		{
-			do
-			{
-				if (!_wcsicmp(ModuleEntry32.szModule, L"Continuum_main.exe"))
-				{
-					ModuleBaseAddress = (uintptr_t)ModuleEntry32.modBaseAddr;
-					break;
-				}
-			} while (Module32Next(hSnapshot, &ModuleEntry32));
-		}
-		
-	}
-	CloseHandle(hSnapshot);
-	return ModuleBaseAddress;
+	wchar_t buf[256];
+	DWORD size = sizeof(buf);
+	if (RegGetValueW(HKEY_CURRENT_USER, kRegistryKey, name, RRF_RT_REG_SZ, nullptr, buf, &size) != ERROR_SUCCESS)
+		return std::wstring();
+	return buf;
 }
-*/
+
+bool GameClient::RegistryDword(const wchar_t* name, DWORD& out)
+{
+	DWORD size = sizeof(out);
+	return RegGetValueW(HKEY_CURRENT_USER, kRegistryKey, name, RRF_RT_REG_DWORD, nullptr, &out, &size) == ERROR_SUCCESS;
+}
+
+} // namespace crpc
