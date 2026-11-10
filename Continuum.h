@@ -36,6 +36,8 @@ public:
 	HANDLE Process() const { return process_; }
 
 	WindowState Windows() const;
+	// True once the game has shown a window, i.e. it has finished starting up.
+	bool HasWindow() const;
 
 	static std::wstring RegistryString(const wchar_t* name);
 	static bool RegistryDword(const wchar_t* name, DWORD& out);
@@ -47,6 +49,9 @@ private:
 	const Config& cfg_;
 	HANDLE process_ = nullptr;
 	DWORD pid_ = 0;
+	DWORD stubPid_ = 0;          // the copy we launched (restarts itself)
+	ULONGLONG launchedAt_ = 0;
+	DWORD lastFailedPid_ = 0;    // avoid repeating the same log line
 };
 
 WindowKind ClassifyWindowTitle(const wchar_t* title);

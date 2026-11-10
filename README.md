@@ -55,7 +55,7 @@ Button2Label=
 Button2Url=
 ```
 
-Set `Debug=1` under `[General]` to write a `cRPC.log` with everything cRPC reads from the game and exchanges with Discord. This is the first thing to check if your status looks wrong. If cRPC ever crashes, it writes `cRPC-crash.log` with the location of the crash.
+Set `Debug=1` under `[General]` to write a `cRPC.log` with everything cRPC reads from the game and exchanges with Discord. This is the first thing to check if your status looks wrong. If cRPC ever fails, it writes `cRPC-crash.log` saying how and where (crash, `abort()`, or an unhandled exception). If the log simply stops with no crash log, cRPC was closed from outside (usually antivirus); see `INSTALL.txt` for where to look.
 
 ### Memory offsets
 The memory layout of Continuum 0.40 comes from [Marvin](https://github.com/plushmonkey/Marvin) (`platform/ContinuumGameProxy.cpp`). All offsets live in `Config.h` and can be overridden under `[Memory]` in `cRPC.ini` (e.g. `Ship=0x5C`), so a client update can be handled without recompiling.

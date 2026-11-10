@@ -111,6 +111,8 @@ bool GameClient::Launch()
 	}
 
 	Log("launch: started %s (pid %lu)", WideToUtf8(exe).c_str(), pi.dwProcessId);
+	stubPid_ = pi.dwProcessId;
+	launchedAt_ = GetTickCount64();
 	CloseHandle(pi.hThread);
 	CloseHandle(pi.hProcess);
 	return true;
@@ -122,9 +124,15 @@ DWORD GameClient::FindProcess() const
 	if (snap == INVALID_HANDLE_VALUE)
 		return 0;
 
+	// Continuum restarts itself on launch: the copy we started spawns the real
+	// client and exits. Like the original cRPC, leave that first copy alone
+	// while it does so, and only fall back to it if it turns out to be the
+	// game itself (still the only one running after a while).
+	constexpr ULONGLONG kStubGraceMs = 15000;
+	const bool stubStarting = stubPid_ && GetTickCount64() - launchedAt_ < kStubGraceMs;
 	const DWORD self = GetCurrentProcessId();
-	DWORD fallback = 0;
-	DWORD best = 0;
+	DWORD found = 0;
+	DWORD stub = 0;
 
 	PROCESSENTRY32W entry;
 	entry.dwSize = sizeof(entry);
@@ -132,14 +140,15 @@ DWORD GameClient::FindProcess() const
 	{
 		if (entry.th32ProcessID == self || _wcsicmp(entry.szExeFile, cfg_.gameExecutable.c_str()) != 0)
 			continue;
-		// The copy we launched restarts itself; prefer the restarted child
-		if (entry.th32ParentProcessID == self)
-			fallback = entry.th32ProcessID;
+		if (entry.th32ProcessID == stubPid_)
+			stub = entry.th32ProcessID;
 		else
-			best = entry.th32ProcessID;
+			found = entry.th32ProcessID;
 	}
 	CloseHandle(snap);
-	return best ? best : fallback;
+	if (found)
+		return found;
+	return stubStarting ? 0 : stub;
 }
 
 void GameClient::Release()
@@ -165,10 +174,21 @@ bool GameClient::Track()
 
 	process_ = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
 	if (!process_)
+	{
+		if (pid != lastFailedPid_)
+			Log("game: found pid %lu but OpenProcess failed, error %lu", pid, GetLastError());
+		lastFailedPid_ = pid;
 		return false;
+	}
 	pid_ = pid;
-	Log("game: tracking pid %lu", pid_);
+	Log("game: tracking pid %lu%s", pid_, pid_ == stubPid_ ? " (the launched copy did not restart itself)" : "");
 	return true;
+}
+
+bool GameClient::HasWindow() const
+{
+	const WindowState ws = Windows();
+	return ws.foreground != WindowKind::None || ws.hasGame || ws.hasChat || ws.hasLauncher;
 }
 
 WindowState GameClient::Windows() const

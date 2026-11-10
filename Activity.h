@@ -31,6 +31,9 @@ public:
 	// Clears the presence and closes the connection.
 	void Shutdown();
 
+	// "connected", "connecting" or "not connected" (for the log)
+	const char* Status() const;
+
 private:
 	enum class State { Disconnected, Handshaking, Connected };
 
@@ -57,6 +60,7 @@ private:
 	ULONGLONG lastSend_ = 0;
 	ULONGLONG nextConnect_ = 0;
 	ULONGLONG deadline_ = 0;  // handshake / reply timeout
+	DWORD lastConnectError_ = 0;
 };
 
 } // namespace crpc

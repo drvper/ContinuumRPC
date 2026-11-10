@@ -10,46 +10,127 @@
 #include "GameMemory.h"
 #include "Presence.h"
 
+#include <tlhelp32.h>
+
+#include <csignal>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <stdexcept>
 
 namespace crpc {
 
 namespace {
-FILE* g_log = nullptr;
+
+// Both files are written with plain WriteFile so they can also be used from
+// crash handlers (where the CRT or the heap may be broken).
+HANDLE g_log = INVALID_HANDLE_VALUE;
 wchar_t g_crashLogPath[MAX_PATH];
 
-// Last-resort diagnostics: if cRPC ever crashes, record where so it can be
-// fixed. Only uses stack memory and plain Win32 calls (the heap may be broken).
-LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info)
+void WriteRaw(HANDLE f, const char* text)
 {
-	const EXCEPTION_RECORD* rec = info->ExceptionRecord;
+	DWORD written = 0;
+	WriteFile(f, text, lstrlenA(text), &written, nullptr);
+}
+
+void Timestamp(char* out)
+{
+	SYSTEMTIME t;
+	GetLocalTime(&t);
+	wsprintfA(out, "[%02d:%02d:%02d.%03d] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+}
+
+// Records a fatal problem in cRPC-crash.log (always) and cRPC.log (if enabled).
+void WriteCrash(const char* what)
+{
+	char line[1200];
+	Timestamp(line);
+	lstrcatA(line, "cRPC " CRPC_VERSION ": ");
+	lstrcpynA(line + lstrlenA(line), what, 1024);
+	lstrcatA(line, "\r\n");
+
+	HANDLE f = CreateFileW(g_crashLogPath, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (f != INVALID_HANDLE_VALUE)
+	{
+		WriteRaw(f, line);
+		CloseHandle(f);
+	}
+	if (g_log != INVALID_HANDLE_VALUE)
+		WriteRaw(g_log, line);
+}
+
+// "exception 0xC0000005 at 0x0040123A (C:\...\Continuum.exe + 0x123A)"
+void DescribeException(const EXCEPTION_RECORD* rec, char* out)
+{
 	wchar_t module[MAX_PATH] = L"?";
 	HMODULE mod = nullptr;
 	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 		static_cast<LPCWSTR>(rec->ExceptionAddress), &mod))
 		GetModuleFileNameW(mod, module, MAX_PATH);
+	const auto addr = reinterpret_cast<std::uintptr_t>(rec->ExceptionAddress);
+	wsprintfA(out, "exception 0x%08lX at 0x%08lX (%ls + 0x%lX)", rec->ExceptionCode,
+		static_cast<unsigned long>(addr), module, static_cast<unsigned long>(addr - reinterpret_cast<std::uintptr_t>(mod)));
+}
 
-	char text[1024];
-	int len = wsprintfA(text, "cRPC " CRPC_VERSION " crashed\r\nexception 0x%08lX at 0x%08lX (%ls + 0x%lX)\r\n",
-		rec->ExceptionCode, static_cast<unsigned long>(reinterpret_cast<std::uintptr_t>(rec->ExceptionAddress)), module,
-		static_cast<unsigned long>(reinterpret_cast<std::uintptr_t>(rec->ExceptionAddress) - reinterpret_cast<std::uintptr_t>(mod)));
-
-	HANDLE f = CreateFileW(g_crashLogPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-	if (f != INVALID_HANDLE_VALUE)
-	{
-		DWORD written = 0;
-		WriteFile(f, text, static_cast<DWORD>(len), &written, nullptr);
-		CloseHandle(f);
-	}
-	if (g_log)
-		fprintf(g_log, "%s", text);
+LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info)
+{
+	char text[1024] = "crashed: ";
+	DescribeException(info->ExceptionRecord, text + lstrlenA(text));
+	WriteCrash(text);
 	return EXCEPTION_EXECUTE_HANDLER; // exit quietly; Discord drops the presence when the pipe closes
 }
+
+// Runs before any other handler, including ones installed by DLLs that other
+// programs inject into this process, so a fatal error is recorded even if one
+// of those swallows the crash. Only logged to cRPC.log because the exception
+// may still be handled.
+LONG CALLBACK FirstChanceHandler(EXCEPTION_POINTERS* info)
+{
+	static int reported = 0;
+	const DWORD code = info->ExceptionRecord->ExceptionCode;
+	if ((code & 0xF0000000) == 0xC0000000 && g_log != INVALID_HANDLE_VALUE && reported < 20)
+	{
+		++reported;
+		char line[1200];
+		Timestamp(line);
+		lstrcatA(line, "first-chance ");
+		DescribeException(info->ExceptionRecord, line + lstrlenA(line));
+		lstrcatA(line, "\r\n");
+		WriteRaw(g_log, line);
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
 }
+
+void OnAbort(int) { WriteCrash("abort() was called"); }
+void OnTerminate()
+{
+	WriteCrash("std::terminate: an exception was not handled");
+	std::abort();
+}
+
+void InstallCrashHandlers(const std::wstring& dir)
+{
+	lstrcpynW(g_crashLogPath, (dir + L"cRPC-crash.log").c_str(), MAX_PATH);
+	AddVectoredExceptionHandler(1, FirstChanceHandler);
+	SetUnhandledExceptionFilter(CrashFilter);
+	std::signal(SIGABRT, OnAbort);
+	std::set_terminate(OnTerminate);
+#ifdef _MSC_VER
+	_set_invalid_parameter_handler([](const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
+		WriteCrash("the C runtime reported an invalid parameter");
+		TerminateProcess(GetCurrentProcess(), 3);
+	});
+	_set_purecall_handler([] {
+		WriteCrash("pure virtual function call");
+		TerminateProcess(GetCurrentProcess(), 3);
+	});
+#endif
+}
+
+} // namespace
 
 std::string WideToUtf8(const std::wstring& wstr)
 {
@@ -84,29 +165,53 @@ std::string AnsiToUtf8(const char* str, std::size_t maxLen)
 
 void LogOpen(const std::wstring& path)
 {
-	if (!g_log && _wfopen_s(&g_log, path.c_str(), L"w") != 0)
-		g_log = nullptr;
+	if (g_log == INVALID_HANDLE_VALUE)
+		g_log = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 }
 
 void Log(const char* fmt, ...)
 {
-	if (!g_log)
+	if (g_log == INVALID_HANDLE_VALUE)
 		return;
-	SYSTEMTIME t;
-	GetLocalTime(&t);
-	fprintf(g_log, "[%02d:%02d:%02d.%03d] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+	char line[2048];
+	Timestamp(line);
+	const int prefix = lstrlenA(line);
 	va_list args;
 	va_start(args, fmt);
-	vfprintf(g_log, fmt, args);
+	int n = std::vsnprintf(line + prefix, sizeof(line) - prefix - 3, fmt, args);
 	va_end(args);
-	fputc('\n', g_log);
-	fflush(g_log);
+	if (n < 0)
+		n = 0;
+	if (n > static_cast<int>(sizeof(line)) - prefix - 3)
+		n = static_cast<int>(sizeof(line)) - prefix - 3;
+	lstrcpyA(line + prefix + n, "\r\n");
+	WriteRaw(g_log, line);
 }
 
 namespace {
 
 constexpr DWORD kTickMs = 50;               // Discord callback pump interval
 constexpr ULONGLONG kLostGraceMs = 5000;    // Continuum restarts itself on launch
+
+// "pid 1234 (Discord.exe)" - shows how cRPC was launched (Steam, Discord, Explorer)
+std::string ParentDescription()
+{
+	std::string result = "unknown";
+	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap == INVALID_HANDLE_VALUE)
+		return result;
+	PROCESSENTRY32W e;
+	e.dwSize = sizeof(e);
+	DWORD parent = 0;
+	for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e))
+		if (e.th32ProcessID == GetCurrentProcessId())
+			parent = e.th32ParentProcessID;
+	for (BOOL ok = Process32FirstW(snap, &e); ok && parent; ok = Process32NextW(snap, &e))
+		if (e.th32ProcessID == parent)
+			result = "pid " + std::to_string(parent) + " (" + WideToUtf8(e.szExeFile) + ")";
+	CloseHandle(snap);
+	return result;
+}
 
 std::string Describe(const GameSnapshot& s, const GameMemory::Result& r)
 {
@@ -172,8 +277,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	using namespace crpc;
 
 	const std::wstring dir = ExeDirectory();
-	lstrcpynW(g_crashLogPath, (dir + L"cRPC-crash.log").c_str(), MAX_PATH);
-	SetUnhandledExceptionFilter(CrashFilter);
+	InstallCrashHandlers(dir);
 
 	const std::wstring ini = dir + L"cRPC.ini";
 	Config::WriteDefault(ini);
@@ -181,9 +285,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	cfg.Load(ini);
 	if (cfg.debugLog)
 		LogOpen(dir + L"cRPC.log");
-	Log("cRPC %s", CRPC_VERSION);
+	Log("cRPC %s, pid %lu, started by %s", CRPC_VERSION, GetCurrentProcessId(), ParentDescription().c_str());
 	for (const std::string& w : cfg.warnings)
 		Log("config: %s", w.c_str());
+
+	// Test hook for tests/integration/run.sh: proves each failure path is logged
+	wchar_t test[16] = L"";
+	if (GetEnvironmentVariableW(L"CRPC_TEST_CRASH", test, _countof(test)))
+	{
+		if (!lstrcmpW(test, L"access"))
+			*static_cast<volatile int*>(nullptr) = 1;
+		if (!lstrcmpW(test, L"abort"))
+			std::abort();
+		if (!lstrcmpW(test, L"throw"))
+			throw std::runtime_error("test");
+	}
 
 	GameClient game(cfg);
 
@@ -203,6 +319,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	const ULONGLONG started = GetTickCount64();
 	ULONGLONG lastSeen = 0;
 	ULONGLONG nextPoll = 0;
+	ULONGLONG nextHeartbeat = 0;
+	bool waitingLogged = false;
 	std::string lastDescription;
 
 	for (;;)
@@ -217,7 +335,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 				if (game.Track())
 				{
 					lastSeen = now;
-					if (cfg.memoryReading && memory.Pid() != game.Pid())
+					// Attach only once the client is up (has a window), never
+					// while it is still starting
+					if (cfg.memoryReading && memory.Pid() != game.Pid() && game.HasWindow())
 						memory.Attach(game.Pid());
 
 					GameMemory::Result mem;
@@ -234,6 +354,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 				}
 				else
 				{
+					if (!waitingLogged)
+						Log("game: waiting for %s to start", WideToUtf8(cfg.gameExecutable).c_str());
+					waitingLogged = true;
 					memory.Detach();
 					if (lastSeen ? now - lastSeen > kLostGraceMs : now - started > cfg.startupTimeoutSec * 1000ULL)
 						break; // the game was closed (or never started)
@@ -248,6 +371,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
 		discord.Tick();
 
+		if (cfg.debugLog && now >= nextHeartbeat)
+		{
+			nextHeartbeat = now + 10000;
+			Log("alive: game pid %lu, memory %s, discord %s", game.Pid(),
+				memory.Attached() ? "attached" : "not attached", discord.Status());
+		}
+
 		// Sleep until the next tick, waking immediately if the game exits
 		if (game.Process())
 		{
@@ -258,7 +388,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 			Sleep(kTickMs);
 	}
 
-	Log("exiting");
+	Log("exiting: the game is no longer running");
 	discord.Shutdown();
 	if (instance)
 		CloseHandle(instance);

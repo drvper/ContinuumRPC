@@ -2,8 +2,8 @@
 #include "Resource.h"
 #include <winver.h>
 
-#define CRPC_VERSION_BIN 2,0,0,0
-#define CRPC_VERSION_STR "2.0.0"
+#define CRPC_VERSION_BIN 2,0,1,0
+#define CRPC_VERSION_STR "2.0.1"
 
 LANGUAGE 9, 1
 

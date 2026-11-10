@@ -20,7 +20,7 @@
 #include <string>
 
 
-#define CRPC_VERSION "2.0.0"
+#define CRPC_VERSION "2.0.1"
 
 namespace crpc {
 

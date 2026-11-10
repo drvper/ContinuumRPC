@@ -79,5 +79,18 @@ expect discord.log '"buttons":[{"label":"Play Subspace Continuum","url":"https:/
 expect discord.log 'CLEAR {"cmd":"SET_ACTIVITY","args":{"pid":'
 expect discord.log "CLIENT CLOSED"
 expect cRPC.log "exiting"
+expect cRPC.log "alive: game pid"
 if [ -e cRPC-crash.log ]; then echo "FAIL: cRPC-crash.log exists"; cat cRPC-crash.log; fail=1; fi
+
+# Every way cRPC can die must leave a trace in cRPC-crash.log
+for kind in access abort throw; do
+	rm -f cRPC-crash.log
+	CRPC_TEST_CRASH=$kind "${RUN[@]}" ./Continuum.exe >/dev/null 2>&1 || true
+	tr -d '\r' < cRPC-crash.log > "$WORK/crash-$kind.log" 2>/dev/null || true
+	echo "== crash test '$kind':"; cat "$WORK/crash-$kind.log"
+done
+expect crash-access.log "crashed: exception 0xC0000005"
+expect crash-access.log "Continuum.exe + 0x"
+expect crash-abort.log "abort() was called"
+expect crash-throw.log "std::terminate: an exception was not handled"
 exit $fail

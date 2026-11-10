@@ -27,14 +27,26 @@ bool DiscordClient::Connect()
 {
 	nextConnect_ = GetTickCount64() + kReconnectIntervalMs;
 
+	DWORD error = 0;
 	for (int i = 0; i < kMaxPipes && pipe_ == INVALID_HANDLE_VALUE; ++i)
 	{
 		wchar_t name[64];
 		swprintf(name, _countof(name), L"\\\\.\\pipe\\discord-ipc-%d", i);
 		pipe_ = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+		if (pipe_ == INVALID_HANDLE_VALUE && (i == 0 || GetLastError() != ERROR_FILE_NOT_FOUND))
+			error = GetLastError(); // keep the most telling error (e.g. busy over not found)
 	}
 	if (pipe_ == INVALID_HANDLE_VALUE)
-		return false; // Discord is not running; try again later
+	{
+		// Discord is not running (or not reachable); try again later
+		if (error != lastConnectError_)
+			Log("discord: cannot open the Discord pipe (error %lu%s), retrying every %llu s", error,
+				error == ERROR_FILE_NOT_FOUND ? ": Discord is not running" : "",
+				static_cast<unsigned long long>(kReconnectIntervalMs / 1000));
+		lastConnectError_ = error;
+		return false;
+	}
+	lastConnectError_ = 0;
 
 	rx_.clear();
 	state_ = State::Handshaking;
@@ -197,6 +209,16 @@ void DiscordClient::Tick()
 	if (state_ == State::Handshaking && GetTickCount64() > deadline_)
 		Disconnect("handshake timed out");
 	Flush();
+}
+
+const char* DiscordClient::Status() const
+{
+	switch (state_)
+	{
+	case State::Connected: return "connected";
+	case State::Handshaking: return "connecting";
+	default: return "not connected";
+	}
 }
 
 void DiscordClient::Shutdown()
